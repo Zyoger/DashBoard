@@ -1,0 +1,1 @@
+Запуск: streamlit run app.py
