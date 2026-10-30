@@ -16,6 +16,12 @@ ETM_SHEETS = {
     "Специализации": ("%ВП ГО DKC по спец", "Специализация"),
 }
 
+# флаги «пользователь явно загрузил файл в этой сессии»
+if "sales_loaded" not in st.session_state:
+    st.session_state["sales_loaded"] = False
+if "etm_loaded" not in st.session_state:
+    st.session_state["etm_loaded"] = False
+
 
 def _multiselect(label, options, key, default=None):
     """Мультивыбор с очисткой устаревших значений при изменении родительских фильтров."""
@@ -45,10 +51,22 @@ with st.sidebar:
             SALES_PATH.parent.mkdir(parents=True, exist_ok=True)
             if not SALES_PATH.exists() or SALES_PATH.read_bytes() != payload:
                 SALES_PATH.write_bytes(payload)
-                for state_key in ["sales_city", "sales_dist", "sales_material"]:
+                for state_key in ["sales_city", "sales_dist", "sales_material",
+                                  "sales_base_year", "sales_curr_year"]:
                     st.session_state.pop(state_key, None)
                 st.cache_data.clear()
+            st.session_state["sales_loaded"] = True
             st.success(f"Файл продаж: {sales_upload.name}")
+
+        if st.session_state["sales_loaded"] and st.button(
+            "🗑 Очистить загруженный файл продаж", key="clear_sales"
+        ):
+            st.session_state["sales_loaded"] = False
+            for state_key in ["sales_city", "sales_dist", "sales_material",
+                              "sales_base_year", "sales_curr_year"]:
+                st.session_state.pop(state_key, None)
+            st.cache_data.clear()
+            st.rerun()
 
         st.divider()
         st.caption("План продаж (CSV)")
@@ -76,7 +94,18 @@ with st.sidebar:
                     if state_key.startswith("etm_sidebar_"):
                         st.session_state.pop(state_key, None)
                 st.cache_data.clear()
+            st.session_state["etm_loaded"] = True
             st.success(f"Файл ЭТМ: {etm_upload.name}")
+
+        if st.session_state["etm_loaded"] and st.button(
+            "🗑 Очистить загруженный файл ЭТМ", key="clear_etm"
+        ):
+            st.session_state["etm_loaded"] = False
+            for state_key in list(st.session_state.keys()):
+                if state_key.startswith("etm_sidebar_"):
+                    st.session_state.pop(state_key, None)
+            st.cache_data.clear()
+            st.rerun()
 
     # ------------------------- ПРОДАЖИ -------------------------------
     sales = None
@@ -87,7 +116,11 @@ with st.sidebar:
     base_year = curr_year = None
     sales_error = None
 
-    if SALES_PATH.exists():
+    # защита от рассинхрона: флаг есть, а файла нет
+    if st.session_state["sales_loaded"] and not SALES_PATH.exists():
+        st.session_state["sales_loaded"] = False
+
+    if st.session_state["sales_loaded"]:
         @st.cache_data(show_spinner="Читаю файл продаж…")
         def _load_sales(path_str: str, mtime: float):
             return load_sales(path_str)
@@ -138,6 +171,11 @@ with st.sidebar:
     # --------------------------- ЭТМ ---------------------------------
     etm_context = None
     etm_error = None
+
+    # защита от рассинхрона: флаг есть, а файла нет
+    if st.session_state["etm_loaded"] and not ETM_PATH.exists():
+        st.session_state["etm_loaded"] = False
+
     with st.expander("🟧 Фильтры ЭТМ", expanded=True):
         etm_kind = st.radio(
             "Разрез аналитики",
@@ -145,7 +183,7 @@ with st.sidebar:
             horizontal=False,
             key="etm_kind_sidebar",
         )
-        if ETM_PATH.exists():
+        if st.session_state["etm_loaded"]:
             sheet_name, dimension = ETM_SHEETS[etm_kind]
             try:
                 file_bytes = ETM_PATH.read_bytes()
