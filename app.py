@@ -1,79 +1,248 @@
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from data_loader import load_sales
-from plans import load_plans
-
+from plans import load_plans, PLANS_PATH
 from tabs import tab_dynamics, tab_project, tab_rs, tab_etm, tab_partners
 
 st.set_page_config(page_title="Продажи ЦО", layout="wide")
 
-DATA_PATH = Path("data/sales.xlsx")
+SALES_PATH = Path("data/sales.xlsx")
+ETM_PATH = Path("data/etm.xlsx")
+ETM_SHEETS = {
+    "Товарные категории": ("%ВП ГО DKC по ТГ", "Товарная категория"),
+    "Специализации": ("%ВП ГО DKC по спец", "Специализация"),
+}
 
 
-# ============================================================
-# САЙДБАР — общий для всех вкладок
-# ============================================================
+def _multiselect(label, options, key, default=None):
+    """Мультивыбор с очисткой устаревших значений при изменении родительских фильтров."""
+    options = list(options)
+    if key in st.session_state:
+        current = st.session_state[key]
+        if not isinstance(current, list):
+            current = []
+        st.session_state[key] = [value for value in current if value in options]
+        return st.multiselect(label, options, key=key)
+    return st.multiselect(label, options, default=default, key=key)
+
+
+# =====================================================================
+# ЕДИНАЯ БОКОВАЯ ПАНЕЛЬ: загрузка источников и все фильтры приложения
+# =====================================================================
 with st.sidebar:
-    st.header("Данные")
-    up = st.file_uploader("Загрузить новую выгрузку (.xlsx)", type=["xlsx"])
-    if up is not None:
-        DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-        DATA_PATH.write_bytes(up.getvalue())
-        st.success(f"Файл загружен: {up.name}")
-        st.cache_data.clear()
+    st.title("Параметры отчёта")
 
-    if not DATA_PATH.exists():
-        st.warning("Положите выгрузку в data/sales.xlsx или загрузите через кнопку выше")
-        st.stop()
+    with st.expander("📂 Загрузка данных", expanded=True):
+        st.caption("Основная выгрузка продаж")
+        sales_upload = st.file_uploader(
+            "Файл продаж (.xlsx)", type=["xlsx"], key="sales_file_uploader"
+        )
+        if sales_upload is not None:
+            payload = sales_upload.getvalue()
+            SALES_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if not SALES_PATH.exists() or SALES_PATH.read_bytes() != payload:
+                SALES_PATH.write_bytes(payload)
+                for state_key in ["sales_city", "sales_dist", "sales_material"]:
+                    st.session_state.pop(state_key, None)
+                st.cache_data.clear()
+            st.success(f"Файл продаж: {sales_upload.name}")
 
-    @st.cache_data(show_spinner="Читаю файл…")
-    def _load(path_str: str, mtime: float):
-        return load_sales(path_str)
+        st.divider()
+        st.caption("План продаж (CSV)")
+        plan_upload = st.file_uploader(
+            "Файл плана (.csv)", type=["csv"], key="plan_file_uploader"
+        )
+        if plan_upload is not None:
+            payload = plan_upload.getvalue()
+            PLANS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if not PLANS_PATH.exists() or PLANS_PATH.read_bytes() != payload:
+                PLANS_PATH.write_bytes(payload)
+            st.success(f"Файл плана: {plan_upload.name}")
 
-    try:
-        sales = _load(str(DATA_PATH), DATA_PATH.stat().st_mtime)
-    except Exception as e:
-        st.error(f"Ошибка чтения файла: {e}")
-        st.stop()
+        st.divider()
+        st.caption("Выгрузка ЭТМ")
+        etm_upload = st.file_uploader(
+            "Файл ЭТМ (.xlsx)", type=["xlsx"], key="etm_file_uploader"
+        )
+        if etm_upload is not None:
+            payload = etm_upload.getvalue()
+            ETM_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if not ETM_PATH.exists() or ETM_PATH.read_bytes() != payload:
+                ETM_PATH.write_bytes(payload)
+                for state_key in list(st.session_state.keys()):
+                    if state_key.startswith("etm_sidebar_"):
+                        st.session_state.pop(state_key, None)
+                st.cache_data.clear()
+            st.success(f"Файл ЭТМ: {etm_upload.name}")
 
-    years = sorted(int(y) for y in sales["Год"].dropna().unique())
+    # ------------------------- ПРОДАЖИ -------------------------------
+    sales = None
+    base = pd.DataFrame()
+    plans = load_plans()
+    years = []
+    city, dist, material = [], [], []
+    base_year = curr_year = None
+    sales_error = None
 
-    st.header("Фильтры")
-    cities = sorted(sales["Город"].dropna().unique())
-    city = st.multiselect("Город", cities, default=cities)
+    if SALES_PATH.exists():
+        @st.cache_data(show_spinner="Читаю файл продаж…")
+        def _load_sales(path_str: str, mtime: float):
+            return load_sales(path_str)
 
-    dists = sorted(sales["Дистрибьютор"].dropna().unique())
-    dist = st.multiselect("Дистрибьютор", dists, default=dists)
+        try:
+            sales = _load_sales(str(SALES_PATH), SALES_PATH.stat().st_mtime)
+            years = sorted(int(y) for y in sales["Год"].dropna().unique())
 
-    mats = (sales[["Код_материала", "Материал"]]
-            .drop_duplicates()
-            .sort_values("Код_материала")["Материал"]
-            .tolist())
-    material = st.multiselect("Материал", mats, default=mats)
+            with st.expander("🔎 Фильтры продаж", expanded=True):
+                cities = sorted(sales["Город"].dropna().unique())
+                city = _multiselect("Город", cities, "sales_city", cities)
 
-    st.subheader("Сравнение годов (YoY)")
-    base_year = st.selectbox("Базовый год (прошлый)", years,
-                             index=max(0, len(years) - 2))
-    curr_year = st.selectbox("Отчётный год (текущий)", years,
-                             index=max(0, len(years) - 1))
-    if base_year == curr_year:
-        st.warning("Базовый и отчётный годы совпадают — YoY будет 0/∞.")
+                dists = sorted(sales["Дистрибьютор"].dropna().unique())
+                dist = _multiselect("Дистрибьютор", dists, "sales_dist", dists)
 
-# ============================================================
-# ПОДГОТОВКА ДАННЫХ (общая для всех вкладок)
-# ============================================================
-base = sales[
-    sales["Город"].isin(city)
-    & sales["Дистрибьютор"].isin(dist)
-    & sales["Материал"].isin(material)
-].copy()
+                mats = (sales[["Код_материала", "Материал"]]
+                        .drop_duplicates()
+                        .sort_values("Код_материала")["Материал"]
+                        .tolist())
+                material = _multiselect("Материал", mats, "sales_material", mats)
 
-plans = load_plans()
+                st.subheader("Сравнение годов (YoY)")
+                if years:
+                    default_base = max(0, len(years) - 2)
+                    default_curr = max(0, len(years) - 1)
+                    base_year = st.selectbox(
+                        "Базовый год (прошлый)", years,
+                        index=default_base, key="sales_base_year"
+                    )
+                    curr_year = st.selectbox(
+                        "Отчётный год (текущий)", years,
+                        index=default_curr, key="sales_curr_year"
+                    )
+                    if base_year == curr_year:
+                        st.warning("Базовый и отчётный годы совпадают — YoY будет 0/∞.")
 
+            base = sales[
+                sales["Город"].isin(city)
+                & sales["Дистрибьютор"].isin(dist)
+                & sales["Материал"].isin(material)
+            ].copy()
+        except Exception as exc:
+            sales_error = str(exc)
+            st.error(f"Ошибка чтения файла продаж: {exc}")
+    else:
+        st.info("Загрузите файл продаж в разделе «Загрузка данных», чтобы открыть вкладки продаж.")
+
+    # --------------------------- ЭТМ ---------------------------------
+    etm_context = None
+    etm_error = None
+    with st.expander("🟧 Фильтры ЭТМ", expanded=True):
+        etm_kind = st.radio(
+            "Разрез аналитики",
+            list(ETM_SHEETS),
+            horizontal=False,
+            key="etm_kind_sidebar",
+        )
+        if ETM_PATH.exists():
+            sheet_name, dimension = ETM_SHEETS[etm_kind]
+            try:
+                file_bytes = ETM_PATH.read_bytes()
+                etm_df = tab_etm._read_etm(file_bytes, sheet_name)
+
+                filter_fields = [
+                    "Макрорегион ДКС", "География", "Тип подразделения",
+                    "ОП", "РК", "ПОК",
+                ]
+                selected_filters = {}
+                filter_keys = {
+                    "Макрорегион ДКС": "etm_sidebar_macro",
+                    "География": "etm_sidebar_geo",
+                    "Тип подразделения": "etm_sidebar_unit_type",
+                    "ОП": "etm_sidebar_op",
+                    "РК": "etm_sidebar_rk",
+                    "ПОК": "etm_sidebar_pok",
+                }
+
+                for field in filter_fields:
+                    # Каждый следующий фильтр показывает только значения,
+                    # доступные после применения предыдущих фильтров.
+                    options_df = etm_df.copy()
+                    for previous_field in filter_fields[:filter_fields.index(field)]:
+                        chosen = selected_filters.get(previous_field, [])
+                        options_df = options_df[
+                            options_df[previous_field].astype(str).isin(chosen)
+                        ]
+                    options = sorted(options_df[field].dropna().astype(str).unique())
+                    if field == "Макрорегион ДКС":
+                        default = ["Центр (ЦО)"] if "Центр (ЦО)" in options else options
+                    else:
+                        default = options
+                    selected_filters[field] = _multiselect(
+                        field, options, filter_keys[field], default
+                    )
+
+                filtered_etm = etm_df.copy()
+                for field in filter_fields:
+                    chosen = selected_filters[field]
+                    if chosen:
+                        filtered_etm = filtered_etm[
+                            filtered_etm[field].astype(str).isin(chosen)
+                        ]
+                    else:
+                        filtered_etm = filtered_etm.iloc[0:0]
+
+                dimension_options = sorted(
+                    filtered_etm[dimension].dropna().astype(str).unique()
+                )
+                selected_dimensions = _multiselect(
+                    dimension,
+                    dimension_options,
+                    f"etm_sidebar_dimension_{etm_kind}",
+                    dimension_options,
+                )
+                if selected_dimensions:
+                    filtered_etm = filtered_etm[
+                        filtered_etm[dimension].astype(str).isin(selected_dimensions)
+                    ]
+                else:
+                    filtered_etm = filtered_etm.iloc[0:0]
+
+                available_months = sorted(tab_etm.FACT_2026.keys())
+                period_end = st.selectbox(
+                    "Период по",
+                    available_months,
+                    index=len(available_months) - 1,
+                    format_func=lambda month: f"{tab_etm.MONTHS[month - 1]} 2026",
+                    key="etm_sidebar_period_end",
+                )
+                if st.button("↩️ Сбросить фильтры ЭТМ", key="etm_sidebar_reset"):
+                    for state_key in list(st.session_state.keys()):
+                        if state_key.startswith("etm_sidebar_") and state_key != "etm_sidebar_kind":
+                            del st.session_state[state_key]
+                    st.rerun()
+
+                etm_context = {
+                    "df": etm_df,
+                    "filtered": filtered_etm,
+                    "kind": etm_kind,
+                    "dimension": dimension,
+                    "selected_filters": selected_filters,
+                    "selected_dimensions": selected_dimensions,
+                    "period_end": period_end,
+                }
+            except Exception as exc:
+                etm_error = str(exc)
+                st.error(f"Не удалось прочитать выгрузку ЭТМ: {exc}")
+        else:
+            st.info("Загрузите файл ЭТМ в разделе «Загрузка данных», чтобы открыть аналитику ЭТМ.")
+
+# =====================================================================
+# ОБЩИЙ КОНТЕКСТ ДЛЯ ВКЛАДОК
+# =====================================================================
 ctx = {
-    "sales": sales,
+    "sales": sales if sales is not None else pd.DataFrame(),
     "base": base,
     "plans": plans,
     "city": city,
@@ -82,11 +251,14 @@ ctx = {
     "base_year": base_year,
     "curr_year": curr_year,
     "years": years,
+    "sales_error": sales_error,
+    "etm": etm_context,
+    "etm_error": etm_error,
 }
 
-# ============================================================
-# ВКЛАДКИ
-# ============================================================
+# =====================================================================
+# ВКЛАДКИ — только визуализация и аналитика
+# =====================================================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📈 Динамика",
     "🤝 Проектное взаимодействие",
@@ -96,16 +268,30 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 with tab1:
-    tab_dynamics.render(ctx)
+    if sales is None:
+        st.info("Для отображения динамики загрузите файл продаж в боковой панели.")
+    elif base.empty:
+        st.warning("По выбранным фильтрам продаж нет данных.")
+    else:
+        tab_dynamics.render(ctx)
 
 with tab2:
-    tab_project.render(ctx)
+    if sales is None:
+        st.info("Для работы раздела загрузите файл продаж в боковой панели.")
+    else:
+        tab_project.render(ctx)
 
 with tab3:
-    tab_rs.render(ctx)
+    if sales is None:
+        st.info("Для работы раздела загрузите файл продаж в боковой панели.")
+    else:
+        tab_rs.render(ctx)
 
 with tab4:
     tab_etm.render(ctx)
 
 with tab5:
-    tab_partners.render(ctx)
+    if sales is None:
+        st.info("Для работы раздела загрузите файл продаж в боковой панели.")
+    else:
+        tab_partners.render(ctx)
