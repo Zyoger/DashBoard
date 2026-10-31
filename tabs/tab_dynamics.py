@@ -116,6 +116,87 @@ def _render_signals(ctx):
                    f"(сузьте фильтры, чтобы увидеть детали).")
 
 
+def _render_city_cards(ctx):
+    """Плитки по городам: продажи отчётного года, YoY, доля,
+    динамика последнего месяца, топ дистрибьютор и материал."""
+    base = ctx["base"]
+    base_year = ctx["base_year"]
+    curr_year = ctx["curr_year"]
+
+    common_months = _common_months(base, base_year, curr_year)
+    if not common_months:
+        st.info("Нет общих месяцев для сравнения выбранных лет.")
+        return
+
+    period = base[
+        base["Год"].isin([base_year, curr_year])
+        & base["Месяц"].isin(common_months)
+    ]
+    if period.empty:
+        st.info("По выбранным фильтрам нет данных за сопоставимые месяцы.")
+        return
+
+    last_month = max(common_months)
+    total_curr = float(period.loc[period["Год"] == curr_year, "Сумма_без_НДС"].sum())
+
+    by_city = (period.groupby(["Город", "Год"])["Сумма_без_НДС"]
+               .sum().unstack("Год", fill_value=0))
+    last_m = (period[period["Месяц"] == last_month]
+              .groupby(["Город", "Год"])["Сумма_без_НДС"]
+              .sum().unstack("Год", fill_value=0))
+    for frame in (by_city, last_m):
+        for year in (base_year, curr_year):
+            if year not in frame.columns:
+                frame[year] = 0.0
+
+    # топ дистрибьютор и топ материал отчётного года по каждому городу
+    curr_df = period[period["Год"] == curr_year]
+
+    def _top(dim):
+        return (curr_df.groupby(["Город", dim])["Сумма_без_НДС"].sum()
+                .reset_index()
+                .sort_values("Сумма_без_НДС", ascending=False)
+                .drop_duplicates("Город")
+                .set_index("Город")[dim])
+
+    top_dist = _top("Дистрибьютор")
+    top_mat = _top("Материал")
+
+    cities = by_city.sort_values(curr_year, ascending=False).index
+    cols_per_row = 3
+    for row_start in range(0, len(cities), cols_per_row):
+        cols = st.columns(cols_per_row)
+        for col, city in zip(cols, cities[row_start:row_start + cols_per_row]):
+            prev = float(by_city.loc[city, base_year])
+            curr = float(by_city.loc[city, curr_year])
+            yoy = (curr / prev - 1) * 100 if prev else None
+            share = curr / total_curr * 100 if total_curr else 0.0
+
+            lm_prev = float(last_m.loc[city, base_year]) if city in last_m.index else 0.0
+            lm_curr = float(last_m.loc[city, curr_year]) if city in last_m.index else 0.0
+            lm_yoy = (lm_curr / lm_prev - 1) * 100 if lm_prev else None
+
+            badge = "🟢" if (yoy is not None and yoy >= 0) else "🔴"
+            with col, st.container(border=True):
+                st.subheader(f"{badge} {city}")
+                st.metric(
+                    f"Продажи {curr_year}, руб",
+                    fmt_rub(curr),
+                    delta=(f"{yoy:+.1f}% vs {base_year}" if yoy is not None
+                           else "нет базы для YoY"),
+                )
+                st.caption(f"Доля в продажах {curr_year}: {share:.1f}%")
+                if lm_yoy is not None:
+                    st.caption(
+                        f"{MONTH_NAMES[last_month - 1]} {curr_year}: "
+                        f"{lm_yoy:+.1f}% к тому же месяцу {base_year}"
+                    )
+                if city in top_dist.index:
+                    st.caption(f"Топ дистрибьютор: {top_dist[city]}")
+                if city in top_mat.index:
+                    st.caption(f"Топ материал: {top_mat[city]}")
+
+
 def _render_overview(ctx):
     base = ctx["base"]
     plans = ctx["plans"]
@@ -693,7 +774,9 @@ def _render_summary(ctx):
 
 def render(ctx):
     st.title("Динамика продаж")
-    overview_tab, summary_tab = st.tabs(["Обзор", "Сводная таблица"])
+    overview_tab, summary_tab, cities_tab = st.tabs(
+        ["Обзор", "Сводная таблица", "🏙 Города"]
+    )
     with overview_tab:
         _render_overview(ctx)
     with summary_tab:
@@ -702,3 +785,8 @@ def render(ctx):
             st.info("По выбранным фильтрам продаж нет данных.")
         else:
             _render_summary(ctx)
+    with cities_tab:
+        if ctx["base"].empty:
+            st.info("По выбранным фильтрам продаж нет данных.")
+        else:
+            _render_city_cards(ctx)
