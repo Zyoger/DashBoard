@@ -149,18 +149,14 @@ def _render_city_cards(ctx):
             if year not in frame.columns:
                 frame[year] = 0.0
 
-    # топ дистрибьютор и топ материал отчётного года по каждому городу
+    # топ дистрибьютор отчётного года по каждому городу
     curr_df = period[period["Год"] == curr_year]
 
-    def _top(dim):
-        return (curr_df.groupby(["Город", dim])["Сумма_без_НДС"].sum()
+    top_dist = (curr_df.groupby(["Город", "Дистрибьютор"])["Сумма_без_НДС"].sum()
                 .reset_index()
                 .sort_values("Сумма_без_НДС", ascending=False)
                 .drop_duplicates("Город")
-                .set_index("Город")[dim])
-
-    top_dist = _top("Дистрибьютор")
-    top_mat = _top("Материал")
+                .set_index("Город")["Дистрибьютор"])
 
     cities = by_city.sort_values(curr_year, ascending=False).index
     cols_per_row = 3
@@ -193,8 +189,6 @@ def _render_city_cards(ctx):
                     )
                 if city in top_dist.index:
                     st.caption(f"Топ дистрибьютор: {top_dist[city]}")
-                if city in top_mat.index:
-                    st.caption(f"Топ материал: {top_mat[city]}")
 
 
 def _render_overview(ctx):
