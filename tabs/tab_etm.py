@@ -281,8 +281,8 @@ def render(ctx):
         f"сравнение YoY — с теми же месяцами {BASE_YEAR} года."
     )
 
-    overview_tab, dynamics_tab, structure_tab, detail_tab = st.tabs(
-        ["📊 Обзор", "📈 Динамика", "🧩 Структура", "📋 Детализация"]
+    overview_tab, dynamics_tab, structure_tab, op_tab, detail_tab = st.tabs(
+        ["📊 Обзор", "📈 Динамика", "🧩 Структура", "🏙 По ОП", "📋 Детализация"]
     )
 
     # Данные для всех разделов
@@ -427,6 +427,82 @@ def render(ctx):
         for col in ["Доля в продажах, %", "Выполнение, %", LBL_YOY]:
             structure_show[col] = structure_show[col].round(1)
         st.dataframe(_display_df(structure_show), width="stretch", hide_index=True)
+
+    with op_tab:
+        ops = by_op.sort_values(LBL_FACT_CURR, ascending=False)["ОП"].tolist()
+        MAX_OP_CHARTS = 12
+        if len(ops) > MAX_OP_CHARTS:
+            st.caption(f"Показаны {MAX_OP_CHARTS} крупнейших ОП из {len(ops)} — "
+                       "сузьте фильтры в боковой панели, чтобы увидеть остальные.")
+            ops = ops[:MAX_OP_CHARTS]
+
+        month_names = [MONTHS[m - 1] for m in months]
+        charts_per_row = 2
+
+        # ---------- помесячная динамика по ОП ----------
+        st.subheader(f"Динамика по месяцам: {BASE_YEAR} vs {CURR_YEAR}")
+        for row_start in range(0, len(ops), charts_per_row):
+            cols = st.columns(charts_per_row)
+            for col, op in zip(cols, ops[row_start:row_start + charts_per_row]):
+                op_rows = filtered[filtered["ОП"] == op]
+                series = [
+                    ([float(op_rows[f"Факт_{m}_{BASE_YEAR}"].sum()) for m in months],
+                     LBL_FACT_BASE, "dash"),
+                    ([float(op_rows[f"Факт_{m}_{CURR_YEAR}"].sum()) for m in months],
+                     LBL_FACT_CURR, "solid"),
+                    ([float(op_rows[f"План_{m}_{CURR_YEAR}"].sum()) for m in months],
+                     LBL_PLAN_CURR, "dot"),
+                ]
+                fig_op = go.Figure()
+                for values, name, dash in series:
+                    fig_op.add_trace(go.Scatter(
+                        x=month_names, y=values, mode="lines+markers",
+                        name=name, line=dict(dash=dash),
+                    ))
+                fig_op.update_layout(
+                    title=op,
+                    height=320,
+                    margin=dict(t=50, b=30),
+                    hovermode="x unified",
+                    xaxis_title="",
+                    yaxis_title="Значение из выгрузки",
+                    legend_title="",
+                )
+                with col:
+                    st.plotly_chart(fig_op, width="stretch")
+
+        # ---------- ТОП-10 разреза по ОП ----------
+        st.subheader(f"{dimension} по ОП (ТОП-10): {BASE_YEAR} vs {CURR_YEAR}")
+        st.caption("ТОП-10 по сумме двух лет за выбранный период.")
+        for row_start in range(0, len(ops), charts_per_row):
+            cols = st.columns(charts_per_row)
+            for col, op in zip(cols, ops[row_start:row_start + charts_per_row]):
+                op_rows = filtered[filtered["ОП"] == op]
+                pivot = pd.DataFrame({
+                    LBL_FACT_BASE: op_rows.groupby(dimension)[fact_base_cols].sum().sum(axis=1),
+                    LBL_FACT_CURR: op_rows.groupby(dimension)[actual_cols].sum().sum(axis=1),
+                })
+                pivot["_total"] = pivot[LBL_FACT_BASE] + pivot[LBL_FACT_CURR]
+                top10 = pivot.sort_values("_total", ascending=False).head(10)
+                # горизонтальный бар рисуется снизу вверх — сортируем по возрастанию,
+                # чтобы крупнейшие группы были сверху
+                top10 = top10.sort_values(LBL_FACT_CURR)
+                fig_top = go.Figure()
+                fig_top.add_trace(go.Bar(y=top10.index, x=top10[LBL_FACT_BASE],
+                                         orientation="h", name=str(BASE_YEAR)))
+                fig_top.add_trace(go.Bar(y=top10.index, x=top10[LBL_FACT_CURR],
+                                         orientation="h", name=str(CURR_YEAR)))
+                fig_top.update_layout(
+                    title=op,
+                    barmode="group",
+                    height=420,
+                    margin=dict(t=50, b=30),
+                    xaxis_title="Значение из выгрузки",
+                    yaxis_title="",
+                    legend_title="",
+                )
+                with col:
+                    st.plotly_chart(fig_top, width="stretch")
 
     with detail_tab:
         st.subheader("Детализация по ОП")
