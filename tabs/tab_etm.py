@@ -327,7 +327,7 @@ def render(ctx):
             geo_show["Изменение к 2025, %"] = geo_show["Изменение к 2025, %"].round(1)
             left, right = st.columns([1.15, 1])
             with left:
-                st.dataframe(_display_df(geo_show), use_container_width=True, hide_index=True)
+                st.dataframe(_display_df(geo_show), width="stretch", hide_index=True)
             with right:
                 geo_fig = px.bar(
                     geo_show, x="География", y="Выполнение, %", color="География",
@@ -335,7 +335,7 @@ def render(ctx):
                 )
                 geo_fig.add_hline(y=100, line_dash="dash", line_color="gray", annotation_text="100%")
                 geo_fig.update_layout(showlegend=False, yaxis_title="Выполнение плана, %", xaxis_title="")
-                st.plotly_chart(geo_fig, use_container_width=True)
+                st.plotly_chart(geo_fig, width="stretch")
         else:
             st.info("Для сравнения выберите Север и Юг в фильтре «География».")
 
@@ -351,7 +351,7 @@ def render(ctx):
         op_show = by_op[["География", "ОП", "Факт 2026", "План 2026", "Выполнение, %", "Изменение к 2025, %", "Отклонение от плана", "Статус"]].copy()
         for col in ["Выполнение, %", "Изменение к 2025, %"]:
             op_show[col] = op_show[col].round(1)
-        st.dataframe(_display_df(op_show.head(30)), use_container_width=True, hide_index=True)
+        st.dataframe(_display_df(op_show.head(30)), width="stretch", hide_index=True)
 
         st.subheader("Автоматические сигналы")
         critical = by_op[by_op["Статус"] == "Критично"].head(5)
@@ -376,7 +376,7 @@ def render(ctx):
         trend_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly["Факт 2025"], mode="lines+markers", name="Факт 2025"))
         trend_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly["Факт 2026"], mode="lines+markers", name="Факт 2026"))
         trend_fig.update_layout(hovermode="x unified", yaxis_title="Значение из выгрузки", xaxis_title="Месяц")
-        st.plotly_chart(trend_fig, use_container_width=True)
+        st.plotly_chart(trend_fig, width="stretch")
 
         st.subheader("Накопительный итог с начала года")
         cumulative_fig = go.Figure()
@@ -384,22 +384,22 @@ def render(ctx):
         cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly["Накопительный факт 2026"], mode="lines+markers", name="Факт 2026 YTD"))
         cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly["Накопительный план 2026"], mode="lines+markers", name="План 2026 YTD", line=dict(dash="dash")))
         cumulative_fig.update_layout(hovermode="x unified", yaxis_title="Накопительное значение", xaxis_title="Месяц")
-        st.plotly_chart(cumulative_fig, use_container_width=True)
+        st.plotly_chart(cumulative_fig, width="stretch")
 
         st.subheader("Факт и план 2026 по месяцам")
         plan_fig = go.Figure()
         plan_fig.add_trace(go.Bar(x=monthly["Месяц"], y=monthly["Факт 2026"], name="Факт 2026"))
         plan_fig.add_trace(go.Bar(x=monthly["Месяц"], y=monthly["План 2026"], name="План 2026"))
         plan_fig.update_layout(barmode="group", yaxis_title="Значение из выгрузки", xaxis_title="Месяц")
-        st.plotly_chart(plan_fig, use_container_width=True)
-        st.dataframe(_display_df(monthly), use_container_width=True, hide_index=True)
+        st.plotly_chart(plan_fig, width="stretch")
+        st.dataframe(_display_df(monthly), width="stretch", hide_index=True)
 
     with structure_tab:
         st.subheader(f"ТОП-10 {dimension.lower()} по факту 2026")
         top10 = by_dimension.head(10).sort_values("Факт 2026", ascending=True)
         top_fig = px.bar(top10, x="Факт 2026", y=dimension, orientation="h", text="Факт 2026")
         top_fig.update_layout(yaxis_title="", xaxis_title="Значение из выгрузки", height=520)
-        st.plotly_chart(top_fig, use_container_width=True)
+        st.plotly_chart(top_fig, width="stretch")
 
         st.subheader("Направления с наибольшим снижением к 2025 году")
         declines = by_dimension[by_dimension["Изменение к 2025, %"].notna()].sort_values("Изменение к 2025, %").head(10)
@@ -409,19 +409,19 @@ def render(ctx):
             decline_show = declines[[dimension, "Факт 2025", "Факт 2026", "Изменение к 2025, %", "Выполнение, %", "Статус"]].copy()
             decline_show["Изменение к 2025, %"] = decline_show["Изменение к 2025, %"].round(1)
             decline_show["Выполнение, %"] = decline_show["Выполнение, %"].round(1)
-            st.dataframe(_display_df(decline_show), use_container_width=True, hide_index=True)
+            st.dataframe(_display_df(decline_show), width="stretch", hide_index=True)
 
         st.subheader("Полная структура")
         structure_show = by_dimension[[dimension, "Факт 2026", "Доля в продажах, %", "План 2026", "Выполнение, %", "Изменение к 2025, %", "Статус"]].copy()
         for col in ["Доля в продажах, %", "Выполнение, %", "Изменение к 2025, %"]:
             structure_show[col] = structure_show[col].round(1)
-        st.dataframe(_display_df(structure_show), use_container_width=True, hide_index=True)
+        st.dataframe(_display_df(structure_show), width="stretch", hide_index=True)
 
     with detail_tab:
         st.subheader("Детализация по ОП")
-        st.dataframe(_display_df(by_op), use_container_width=True, hide_index=True)
+        st.dataframe(_display_df(by_op), width="stretch", hide_index=True)
         st.subheader(f"Детализация по {dimension.lower()}")
-        st.dataframe(_display_df(by_dimension), use_container_width=True, hide_index=True)
+        st.dataframe(_display_df(by_dimension), width="stretch", hide_index=True)
 
         summary = pd.DataFrame([
             {"Показатель": "Факт 2026", "Значение": fact26},
@@ -437,7 +437,7 @@ def render(ctx):
             data=report,
             file_name=f"ETM_аналитика_{kind}_{period_end:02d}_2026.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
 
     st.caption(
