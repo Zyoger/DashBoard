@@ -1,5 +1,4 @@
 import re
-from pathlib import Path
 from io import BytesIO
 
 import pandas as pd
@@ -7,8 +6,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-
-ETM_PATH = Path("data/etm.xlsx")
 
 # Годы анализа: базовый (факт прошлого года) и отчётный (план + факт).
 BASE_YEAR = 2025

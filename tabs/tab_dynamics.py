@@ -259,7 +259,8 @@ def _render_overview(ctx):
     # ---------- редактор общего плана по кварталам ----------
     with st.expander("✏️ Общий план по кварталам — редактирование"):
         st.caption("Формат: Год | Квартал | План без НДС. План общий, "
-                   "не привязан к дистрибьюторам.")
+                   "не привязан к дистрибьюторам. "
+                   "Хранится в памяти сессии и не записывается на диск.")
 
         years_all = sorted(int(y) for y in ctx["sales"]["Год"].dropna().unique())
 
@@ -278,13 +279,13 @@ def _render_overview(ctx):
             key="plans_editor",
         )
 
-        from plans import save_plans
         col_a, col_b = st.columns([1, 1])
         if col_a.button("💾 Сохранить план", type="primary"):
-            save_plans(edited)
-            st.success("План сохранён в data/plans.csv")
+            st.session_state["plans_df"] = edited
+            st.success("План сохранён в рамках текущей сессии.")
             st.rerun()
-        if col_b.button("🔄 Перечитать plans.csv"):
+        if col_b.button("↩️ Вернуть план по умолчанию"):
+            st.session_state.pop("plans_df", None)
             st.rerun()
 
 

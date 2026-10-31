@@ -1,26 +1,40 @@
-from pathlib import Path
+from io import BytesIO
 
 import pandas as pd
 import streamlit as st
 
 from data_loader import load_sales
-from plans import load_plans, PLANS_PATH
+from plans import load_plans, parse_plans
 from tabs import tab_dynamics, tab_project, tab_rs, tab_etm, tab_partners
 
 st.set_page_config(page_title="Продажи ЦО", layout="wide")
 
-SALES_PATH = Path("data/sales.xlsx")
-ETM_PATH = Path("data/etm.xlsx")
 ETM_SHEETS = {
     "Товарные категории": ("%ВП ГО DKC по ТГ", "Товарная категория"),
     "Специализации": ("%ВП ГО DKC по спец", "Специализация"),
 }
 
-# флаги «пользователь явно загрузил файл в этой сессии»
-if "sales_loaded" not in st.session_state:
-    st.session_state["sales_loaded"] = False
-if "etm_loaded" not in st.session_state:
-    st.session_state["etm_loaded"] = False
+SALES_FILTER_KEYS = ["sales_city", "sales_dist", "sales_material",
+                     "sales_base_year", "sales_curr_year"]
+
+
+def _reset_etm_filters():
+    for state_key in list(st.session_state.keys()):
+        if state_key.startswith("etm_sidebar_"):
+            st.session_state.pop(state_key, None)
+
+
+# Загруженные пользователем файлы живут только в памяти сессии —
+# на диск ничего не записывается.
+if "sales_bytes" not in st.session_state:
+    st.session_state["sales_bytes"] = None
+if "plan_bytes" not in st.session_state:
+    st.session_state["plan_bytes"] = None
+if "etm_bytes" not in st.session_state:
+    st.session_state["etm_bytes"] = None
+if "plans_df" not in st.session_state:
+    # стартовый план из data/plans.csv, если файл есть в репозитории
+    st.session_state["plans_df"] = load_plans()
 
 
 def _multiselect(label, options, key, default=None):
@@ -48,22 +62,18 @@ with st.sidebar:
         )
         if sales_upload is not None:
             payload = sales_upload.getvalue()
-            SALES_PATH.parent.mkdir(parents=True, exist_ok=True)
-            if not SALES_PATH.exists() or SALES_PATH.read_bytes() != payload:
-                SALES_PATH.write_bytes(payload)
-                for state_key in ["sales_city", "sales_dist", "sales_material",
-                                  "sales_base_year", "sales_curr_year"]:
+            if payload != st.session_state["sales_bytes"]:
+                st.session_state["sales_bytes"] = payload
+                for state_key in SALES_FILTER_KEYS:
                     st.session_state.pop(state_key, None)
                 st.cache_data.clear()
-            st.session_state["sales_loaded"] = True
             st.success(f"Файл продаж: {sales_upload.name}")
 
-        if st.session_state["sales_loaded"] and st.button(
+        if st.session_state["sales_bytes"] is not None and st.button(
             "🗑 Очистить загруженный файл продаж", key="clear_sales"
         ):
-            st.session_state["sales_loaded"] = False
-            for state_key in ["sales_city", "sales_dist", "sales_material",
-                              "sales_base_year", "sales_curr_year"]:
+            st.session_state["sales_bytes"] = None
+            for state_key in SALES_FILTER_KEYS:
                 st.session_state.pop(state_key, None)
             st.cache_data.clear()
             st.rerun()
@@ -75,10 +85,13 @@ with st.sidebar:
         )
         if plan_upload is not None:
             payload = plan_upload.getvalue()
-            PLANS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            if not PLANS_PATH.exists() or PLANS_PATH.read_bytes() != payload:
-                PLANS_PATH.write_bytes(payload)
-            st.success(f"Файл плана: {plan_upload.name}")
+            if payload != st.session_state["plan_bytes"]:
+                st.session_state["plan_bytes"] = payload
+                try:
+                    st.session_state["plans_df"] = parse_plans(BytesIO(payload))
+                    st.success(f"Файл плана: {plan_upload.name}")
+                except Exception as exc:
+                    st.error(f"Не удалось прочитать файл плана: {exc}")
 
         st.divider()
         st.caption("Выгрузка ЭТМ")
@@ -87,46 +100,38 @@ with st.sidebar:
         )
         if etm_upload is not None:
             payload = etm_upload.getvalue()
-            ETM_PATH.parent.mkdir(parents=True, exist_ok=True)
-            if not ETM_PATH.exists() or ETM_PATH.read_bytes() != payload:
-                ETM_PATH.write_bytes(payload)
-                for state_key in list(st.session_state.keys()):
-                    if state_key.startswith("etm_sidebar_"):
-                        st.session_state.pop(state_key, None)
+            if payload != st.session_state["etm_bytes"]:
+                st.session_state["etm_bytes"] = payload
+                _reset_etm_filters()
                 st.cache_data.clear()
-            st.session_state["etm_loaded"] = True
             st.success(f"Файл ЭТМ: {etm_upload.name}")
 
-        if st.session_state["etm_loaded"] and st.button(
+        if st.session_state["etm_bytes"] is not None and st.button(
             "🗑 Очистить загруженный файл ЭТМ", key="clear_etm"
         ):
-            st.session_state["etm_loaded"] = False
-            for state_key in list(st.session_state.keys()):
-                if state_key.startswith("etm_sidebar_"):
-                    st.session_state.pop(state_key, None)
+            st.session_state["etm_bytes"] = None
+            _reset_etm_filters()
             st.cache_data.clear()
             st.rerun()
+
+        st.caption("Файлы обрабатываются в памяти и нигде не сохраняются.")
 
     # ------------------------- ПРОДАЖИ -------------------------------
     sales = None
     base = pd.DataFrame()
-    plans = load_plans()
+    plans = st.session_state["plans_df"]
     years = []
     city, dist, material = [], [], []
     base_year = curr_year = None
     sales_error = None
 
-    # защита от рассинхрона: флаг есть, а файла нет
-    if st.session_state["sales_loaded"] and not SALES_PATH.exists():
-        st.session_state["sales_loaded"] = False
-
-    if st.session_state["sales_loaded"]:
+    if st.session_state["sales_bytes"] is not None:
         @st.cache_data(show_spinner="Читаю файл продаж…")
-        def _load_sales(path_str: str, mtime: float):
-            return load_sales(path_str)
+        def _load_sales(payload: bytes):
+            return load_sales(BytesIO(payload))
 
         try:
-            sales = _load_sales(str(SALES_PATH), SALES_PATH.stat().st_mtime)
+            sales = _load_sales(st.session_state["sales_bytes"])
             years = sorted(int(y) for y in sales["Год"].dropna().unique())
 
             with st.expander("🔎 Фильтры продаж", expanded=True):
@@ -172,10 +177,6 @@ with st.sidebar:
     etm_context = None
     etm_error = None
 
-    # защита от рассинхрона: флаг есть, а файла нет
-    if st.session_state["etm_loaded"] and not ETM_PATH.exists():
-        st.session_state["etm_loaded"] = False
-
     with st.expander("🟧 Фильтры ЭТМ", expanded=True):
         etm_kind = st.radio(
             "Разрез аналитики",
@@ -183,11 +184,12 @@ with st.sidebar:
             horizontal=False,
             key="etm_kind_sidebar",
         )
-        if st.session_state["etm_loaded"]:
+        if st.session_state["etm_bytes"] is not None:
             sheet_name, dimension = ETM_SHEETS[etm_kind]
             try:
-                file_bytes = ETM_PATH.read_bytes()
-                etm_df, etm_fact_months = tab_etm._read_etm(file_bytes, sheet_name)
+                etm_df, etm_fact_months = tab_etm._read_etm(
+                    st.session_state["etm_bytes"], sheet_name
+                )
 
                 filter_fields = [
                     "Макрорегион ДКС", "География", "Тип подразделения",
@@ -256,9 +258,7 @@ with st.sidebar:
                     key="etm_sidebar_period_end",
                 )
                 if st.button("↩️ Сбросить фильтры ЭТМ", key="etm_sidebar_reset"):
-                    for state_key in list(st.session_state.keys()):
-                        if state_key.startswith("etm_sidebar_") and state_key != "etm_sidebar_kind":
-                            del st.session_state[state_key]
+                    _reset_etm_filters()
                     st.rerun()
 
                 etm_context = {
