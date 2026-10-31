@@ -35,6 +35,87 @@ def _plan_by_quarter(plans, year_):
     return p if not p.empty else None
 
 
+def _render_signals(ctx):
+    """Автоматические сигналы: сущности с заметным снижением к базовому году.
+
+    Критично: YoY ≤ −10 %; внимание: YoY < 0 %. Сущности с долей
+    меньше 2 % продаж отчётного года отсекаются, чтобы не шуметь.
+    Дополнительно: выполнение плана и YoY последнего общего месяца.
+    """
+    base = ctx["base"]
+    plans = ctx["plans"]
+    base_year = ctx["base_year"]
+    curr_year = ctx["curr_year"]
+
+    common_months = _common_months(base, base_year, curr_year)
+    if not common_months:
+        return
+
+    period = base[
+        base["Год"].isin([base_year, curr_year])
+        & base["Месяц"].isin(common_months)
+    ]
+    total_curr = float(period.loc[period["Год"] == curr_year, "Сумма_без_НДС"].sum())
+    if not total_curr:
+        return
+
+    critical: list[tuple[float, str]] = []
+    warning: list[tuple[float, str]] = []
+
+    for dim in ("Город", "Дистрибьютор", "Материал"):
+        grouped = (period.groupby([dim, "Год"])["Сумма_без_НДС"]
+                   .sum().unstack("Год", fill_value=0))
+        for year in (base_year, curr_year):
+            if year not in grouped.columns:
+                grouped[year] = 0.0
+        for name, row in grouped.iterrows():
+            prev, curr = float(row[base_year]), float(row[curr_year])
+            if prev <= 0:
+                continue  # нет базы для сравнения — не сигналим
+            share = curr / total_curr * 100
+            if share < 2:
+                continue  # мизерная доля — не сигналим
+            yoy = (curr / prev - 1) * 100
+            text = (f"{dim} «{name}»: {yoy:+.1f}% к {base_year} году "
+                    f"(доля {share:.0f}% продаж {curr_year})")
+            if yoy <= -10:
+                critical.append((yoy, text))
+            elif yoy < 0:
+                warning.append((yoy, text))
+
+    plan_curr = _plan_total(plans, curr_year)
+    if plan_curr:
+        execution = total_curr / plan_curr * 100
+        if execution < 100:
+            warning.append((0.0, f"Выполнение плана {curr_year}: {execution:.1f}% "
+                                 f"(план {fmt_rub(plan_curr)} руб)"))
+
+    last_month = max(common_months)
+    lm_base = float(period.loc[(period["Год"] == base_year) & (period["Месяц"] == last_month),
+                               "Сумма_без_НДС"].sum())
+    lm_curr = float(period.loc[(period["Год"] == curr_year) & (period["Месяц"] == last_month),
+                               "Сумма_без_НДС"].sum())
+    if lm_base > 0:
+        lm_yoy = (lm_curr / lm_base - 1) * 100
+        if lm_yoy < 0:
+            warning.append((lm_yoy, f"{MONTH_NAMES[last_month - 1]} {curr_year}: "
+                                    f"{lm_yoy:+.1f}% к тому же месяцу {base_year} года"))
+
+    st.subheader("Автоматические сигналы")
+    if not critical and not warning:
+        st.success(f"Сущностей со снижением к {base_year} году не обнаружено "
+                   f"(города, дистрибьюторы, материалы).")
+        return
+    for _, text in sorted(critical, key=lambda item: item[0]):
+        st.error(text)
+    warning_sorted = sorted(warning, key=lambda item: item[0])
+    for _, text in warning_sorted[:7]:
+        st.warning(text)
+    if len(warning_sorted) > 7:
+        st.caption(f"…и ещё {len(warning_sorted) - 7} предупреждений "
+                   f"(сузьте фильтры, чтобы увидеть детали).")
+
+
 def _render_overview(ctx):
     base = ctx["base"]
     plans = ctx["plans"]
@@ -70,6 +151,8 @@ def _render_overview(ctx):
     c4.metric(f"Выполнение плана {curr_year}",
               f"{exec_curr:.1f}%" if exec_curr is not None else "—",
               delta=(f"план {fmt_rub(plan_curr)}" if plan_curr else None))
+
+    _render_signals(ctx)
 
     # ---------- план vs факт по кварталам ----------
     st.subheader(f"План vs факт по кварталам — {curr_year}")
