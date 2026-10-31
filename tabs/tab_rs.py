@@ -139,6 +139,44 @@ def render(ctx):
         width="stretch", hide_index=True,
     )
 
+    # ---------- структура по группам продукции (ТОП-10) ----------
+    st.subheader(f"Группы продукции по городам (ТОП-10): {base_year} vs {curr_year}")
+    st.caption("ТОП-10 материалов города по сумме двух лет за сопоставимые месяцы.")
+
+    mat_city = (period.groupby(["Город", "Материал", "Год"])["Сумма_без_НДС"]
+                .sum().reset_index())
+
+    for row_start in range(0, len(cities_sorted), 2):
+        cols = st.columns(2)
+        for col, city in zip(cols, cities_sorted[row_start:row_start + 2]):
+            city_data = mat_city[mat_city["Город"] == city]
+            pivot = city_data.pivot_table(index="Материал", columns="Год",
+                                          values="Сумма_без_НДС", fill_value=0)
+            for year in (base_year, curr_year):
+                if year not in pivot.columns:
+                    pivot[year] = 0.0
+            pivot["_total"] = pivot[base_year] + pivot[curr_year]
+            top10 = pivot.sort_values("_total", ascending=False).head(10)
+            # горизонтальный бар рисуется снизу вверх — сортируем по возрастанию,
+            # чтобы крупнейшие группы были сверху
+            top10 = top10.sort_values(curr_year)
+            fig_mat = go.Figure()
+            fig_mat.add_trace(go.Bar(y=top10.index, x=top10[base_year],
+                                     orientation="h", name=str(base_year)))
+            fig_mat.add_trace(go.Bar(y=top10.index, x=top10[curr_year],
+                                     orientation="h", name=str(curr_year)))
+            fig_mat.update_layout(
+                title=city,
+                barmode="group",
+                xaxis_title="Сумма без НДС, руб",
+                yaxis_title="",
+                legend_title="Год",
+                height=420,
+                margin=dict(t=50, b=30),
+            )
+            with col:
+                st.plotly_chart(fig_mat, width="stretch")
+
     # ---------- месячный план по филиалам ----------
     st.subheader(f"Месячный план по филиалам — {curr_year}")
     st.caption("План редактируется вручную, хранится в памяти сессии "
