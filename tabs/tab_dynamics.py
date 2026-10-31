@@ -560,9 +560,12 @@ def _render_summary(ctx):
     COLOR_UP = "#1b7f3b"
     COLOR_DOWN = "#c0392b"
 
+    # Правая (месячная) часть: та же иерархия строк, что и слева,
+    # но в чуть более холодном голубом оттенке.
     COLOR_MONTH_HEADER = "#2e6b8f"
-    COLOR_MONTH_CELL = "#eaf4f8"
-    COLOR_MONTH_MUTED = "#3f6b7d"
+    COLOR_BG_DIST_M = "#dce9f4"
+    COLOR_BG_TOTAL_M = "#c9dcea"
+    COLOR_BG_ROW_M = "#f3f8fb"
 
     month_cols = {
         col_m_base, col_m_curr,
@@ -580,24 +583,20 @@ def _render_summary(ctx):
         for col in row.index:
             is_month = col in month_cols
             if name == "ИТОГО":
-                bg = COLOR_BG_TOTAL
+                bg = COLOR_BG_TOTAL_M if is_month else COLOR_BG_TOTAL
                 fg = COLOR_TEXT
                 weight = "700"
                 extra = "border-top: 2px solid #1f4e79;"
             elif level == 0:
-                bg = COLOR_BG_DIST
+                bg = COLOR_BG_DIST_M if is_month else COLOR_BG_DIST
                 fg = COLOR_TEXT
                 weight = "600"
                 extra = ""
             else:
-                bg = COLOR_BG_ROW
+                bg = COLOR_BG_ROW_M if is_month else COLOR_BG_ROW
                 fg = COLOR_TEXT_MUTED
                 weight = "400"
                 extra = ""
-
-            if is_month:
-                bg = COLOR_MONTH_CELL if name != "ИТОГО" else COLOR_BG_TOTAL
-                fg = COLOR_MONTH_MUTED if level == 1 else COLOR_TEXT
 
             row_styles.append(
                 f"background-color: {bg}; color: {fg}; font-weight: {weight}; {extra}"
