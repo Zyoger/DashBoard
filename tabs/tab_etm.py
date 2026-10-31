@@ -14,6 +14,16 @@ ETM_PATH = Path("data/etm.xlsx")
 BASE_YEAR = 2025
 CURR_YEAR = 2026
 
+# Подписи колонок и метрик, собранные из годов, — при смене года
+# достаточно поправить BASE_YEAR/CURR_YEAR выше.
+LBL_FACT_BASE = f"Факт {BASE_YEAR}"
+LBL_FACT_CURR = f"Факт {CURR_YEAR}"
+LBL_PLAN_CURR = f"План {CURR_YEAR}"
+LBL_YOY = f"Изменение к {BASE_YEAR}, %"
+LBL_CUM_FACT_BASE = f"Накопительный факт {BASE_YEAR}"
+LBL_CUM_FACT_CURR = f"Накопительный факт {CURR_YEAR}"
+LBL_CUM_PLAN_CURR = f"Накопительный план {CURR_YEAR}"
+
 DIM_NAMES = ["ПОК", "РК", "ДП", "Макрорегион ДКС", "ОП", "37 кл"]
 DIMENSION_NAMES = ("Специализация", "Товарная категория")
 
@@ -204,17 +214,17 @@ def _status(execution, yoy):
     return "Нет данных"
 
 
-def _aggregate(frame, group_fields, actual_cols, plan_cols, fact25_cols):
-    grouped = frame.groupby(group_fields, dropna=False)[actual_cols + plan_cols + fact25_cols].sum().reset_index()
-    grouped["Факт 2026"] = grouped[actual_cols].sum(axis=1)
-    grouped["План 2026"] = grouped[plan_cols].sum(axis=1)
-    grouped["Факт 2025"] = grouped[fact25_cols].sum(axis=1)
+def _aggregate(frame, group_fields, actual_cols, plan_cols, fact_base_cols):
+    grouped = frame.groupby(group_fields, dropna=False)[actual_cols + plan_cols + fact_base_cols].sum().reset_index()
+    grouped[LBL_FACT_CURR] = grouped[actual_cols].sum(axis=1)
+    grouped[LBL_PLAN_CURR] = grouped[plan_cols].sum(axis=1)
+    grouped[LBL_FACT_BASE] = grouped[fact_base_cols].sum(axis=1)
     grouped["Выполнение, %"] = grouped.apply(
-        lambda row: _pct(row["Факт 2026"], row["План 2026"]), axis=1
+        lambda row: _pct(row[LBL_FACT_CURR], row[LBL_PLAN_CURR]), axis=1
     )
-    grouped["Отклонение от плана"] = grouped["Факт 2026"] - grouped["План 2026"]
-    grouped["Изменение к 2025, %"] = grouped.apply(
-        lambda row: _pct(row["Факт 2026"] - row["Факт 2025"], row["Факт 2025"]), axis=1
+    grouped["Отклонение от плана"] = grouped[LBL_FACT_CURR] - grouped[LBL_PLAN_CURR]
+    grouped[LBL_YOY] = grouped.apply(
+        lambda row: _pct(row[LBL_FACT_CURR] - row[LBL_FACT_BASE], row[LBL_FACT_BASE]), axis=1
     )
     return grouped
 
@@ -260,71 +270,75 @@ def render(ctx):
     months = [month for month in available_months if month <= period_end]
     actual_cols = [f"Факт_{month}_{CURR_YEAR}" for month in months]
     plan_cols = [f"План_{month}_{CURR_YEAR}" for month in months]
-    fact25_cols = [f"Факт_{month}_{BASE_YEAR}" for month in months]
+    fact_base_cols = [f"Факт_{month}_{BASE_YEAR}" for month in months]
 
-    fact26 = float(filtered[actual_cols].sum().sum())
-    plan26 = float(filtered[plan_cols].sum().sum())
-    fact25 = float(filtered[fact25_cols].sum().sum())
-    execution = _pct(fact26, plan26)
-    yoy = _pct(fact26 - fact25, fact25)
-    gap = fact26 - plan26
+    fact_curr_total = float(filtered[actual_cols].sum().sum())
+    plan_curr_total = float(filtered[plan_cols].sum().sum())
+    fact_base_total = float(filtered[fact_base_cols].sum().sum())
+    execution = _pct(fact_curr_total, plan_curr_total)
+    yoy = _pct(fact_curr_total - fact_base_total, fact_base_total)
+    gap = fact_curr_total - plan_curr_total
 
-    st.caption(f"Период анализа: январь — {MONTHS[period_end - 1].lower()} 2026 года; сравнение YoY — с теми же месяцами 2025 года.")
+    st.caption(
+        f"Период анализа: январь — {MONTHS[period_end - 1].lower()} {CURR_YEAR} года; "
+        f"сравнение YoY — с теми же месяцами {BASE_YEAR} года."
+    )
 
     overview_tab, dynamics_tab, structure_tab, detail_tab = st.tabs(
         ["📊 Обзор", "📈 Динамика", "🧩 Структура", "📋 Детализация"]
     )
 
     # Данные для всех разделов
-    by_op = _aggregate(filtered, ["География", "ОП"], actual_cols, plan_cols, fact25_cols)
+    by_op = _aggregate(filtered, ["География", "ОП"], actual_cols, plan_cols, fact_base_cols)
     by_op["Статус"] = by_op.apply(
-        lambda row: _status(row["Выполнение, %"], row["Изменение к 2025, %"]), axis=1
+        lambda row: _status(row["Выполнение, %"], row[LBL_YOY]), axis=1
     )
-    by_op = by_op.sort_values(["Выполнение, %", "Факт 2026"], ascending=[True, False], na_position="last")
+    by_op = by_op.sort_values(["Выполнение, %", LBL_FACT_CURR], ascending=[True, False], na_position="last")
 
-    by_dimension = _aggregate(filtered, [dimension], actual_cols, plan_cols, fact25_cols)
-    by_dimension["Доля в продажах, %"] = by_dimension["Факт 2026"].apply(
-        lambda value: _pct(value, fact26)
+    by_dimension = _aggregate(filtered, [dimension], actual_cols, plan_cols, fact_base_cols)
+    by_dimension["Доля в продажах, %"] = by_dimension[LBL_FACT_CURR].apply(
+        lambda value: _pct(value, fact_curr_total)
     )
     by_dimension["Статус"] = by_dimension.apply(
-        lambda row: _status(row["Выполнение, %"], row["Изменение к 2025, %"]), axis=1
+        lambda row: _status(row["Выполнение, %"], row[LBL_YOY]), axis=1
     )
-    by_dimension = by_dimension.sort_values("Факт 2026", ascending=False)
+    by_dimension = by_dimension.sort_values(LBL_FACT_CURR, ascending=False)
 
-    by_geo = _aggregate(filtered, ["География"], actual_cols, plan_cols, fact25_cols)
+    by_geo = _aggregate(filtered, ["География"], actual_cols, plan_cols, fact_base_cols)
 
     monthly_rows = []
     for month in months:
-        a26 = float(filtered[f"Факт_{month}_{CURR_YEAR}"].sum())
-        p26 = float(filtered[f"План_{month}_{CURR_YEAR}"].sum())
-        a25 = float(filtered[f"Факт_{month}_{BASE_YEAR}"].sum())
+        a_curr = float(filtered[f"Факт_{month}_{CURR_YEAR}"].sum())
+        p_curr = float(filtered[f"План_{month}_{CURR_YEAR}"].sum())
+        a_base = float(filtered[f"Факт_{month}_{BASE_YEAR}"].sum())
         monthly_rows.append({
             "Месяц": MONTHS[month - 1],
-            "Факт 2025": a25,
-            "Факт 2026": a26,
-            "План 2026": p26,
-            "Выполнение, %": _pct(a26, p26),
-            "Отклонение от плана": a26 - p26,
+            LBL_FACT_BASE: a_base,
+            LBL_FACT_CURR: a_curr,
+            LBL_PLAN_CURR: p_curr,
+            "Выполнение, %": _pct(a_curr, p_curr),
+            "Отклонение от плана": a_curr - p_curr,
         })
     monthly = pd.DataFrame(monthly_rows)
-    monthly["Накопительный факт 2025"] = monthly["Факт 2025"].cumsum()
-    monthly["Накопительный факт 2026"] = monthly["Факт 2026"].cumsum()
-    monthly["Накопительный план 2026"] = monthly["План 2026"].cumsum()
+    monthly[LBL_CUM_FACT_BASE] = monthly[LBL_FACT_BASE].cumsum()
+    monthly[LBL_CUM_FACT_CURR] = monthly[LBL_FACT_CURR].cumsum()
+    monthly[LBL_CUM_PLAN_CURR] = monthly[LBL_PLAN_CURR].cumsum()
 
     with overview_tab:
         st.subheader("Ключевые показатели")
         k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("Факт 2026", _fmt(fact26), delta=f"{yoy:+.1f}% к 2025" if yoy is not None else "нет базы для YoY")
-        k2.metric("План 2026", _fmt(plan26))
+        k1.metric(LBL_FACT_CURR, _fmt(fact_curr_total),
+                  delta=f"{yoy:+.1f}% к {BASE_YEAR}" if yoy is not None else "нет базы для YoY")
+        k2.metric(LBL_PLAN_CURR, _fmt(plan_curr_total))
         k3.metric("Выполнение плана", f"{execution:.1f}%" if execution is not None else "—")
         k4.metric("Отклонение от плана", _fmt(gap), delta="выше плана" if gap >= 0 else "ниже плана", delta_color="normal" if gap >= 0 else "inverse")
-        k5.metric("Факт 2025", _fmt(fact25))
+        k5.metric(LBL_FACT_BASE, _fmt(fact_base_total))
 
         st.subheader("Сравнение Севера и Юга")
         if not by_geo.empty:
-            geo_show = by_geo[["География", "Факт 2026", "План 2026", "Выполнение, %", "Факт 2025", "Изменение к 2025, %"]].copy()
+            geo_show = by_geo[["География", LBL_FACT_CURR, LBL_PLAN_CURR, "Выполнение, %", LBL_FACT_BASE, LBL_YOY]].copy()
             geo_show["Выполнение, %"] = geo_show["Выполнение, %"].round(1)
-            geo_show["Изменение к 2025, %"] = geo_show["Изменение к 2025, %"].round(1)
+            geo_show[LBL_YOY] = geo_show[LBL_YOY].round(1)
             left, right = st.columns([1.15, 1])
             with left:
                 st.dataframe(_display_df(geo_show), width="stretch", hide_index=True)
@@ -348,8 +362,8 @@ def render(ctx):
         extra2.metric("ОП с наибольшим отставанием", weak_name)
 
         st.subheader("Рейтинг ОП — зоны внимания вверху")
-        op_show = by_op[["География", "ОП", "Факт 2026", "План 2026", "Выполнение, %", "Изменение к 2025, %", "Отклонение от плана", "Статус"]].copy()
-        for col in ["Выполнение, %", "Изменение к 2025, %"]:
+        op_show = by_op[["География", "ОП", LBL_FACT_CURR, LBL_PLAN_CURR, "Выполнение, %", LBL_YOY, "Отклонение от плана", "Статус"]].copy()
+        for col in ["Выполнение, %", LBL_YOY]:
             op_show[col] = op_show[col].round(1)
         st.dataframe(_display_df(op_show.head(30)), width="stretch", hide_index=True)
 
@@ -367,53 +381,53 @@ def render(ctx):
                 )
             for _, row in attention.iterrows():
                 exec_text = f"{row['Выполнение, %']:.1f}%" if pd.notna(row["Выполнение, %"]) else "нет данных по плану"
-                yoy_text = f"{row['Изменение к 2025, %']:+.1f}%" if pd.notna(row["Изменение к 2025, %"]) else "нет базы для сравнения"
-                st.warning(f"{row['ОП']} ({row['География']}): выполнение {exec_text}; динамика к 2025 году {yoy_text}.")
+                yoy_text = f"{row[LBL_YOY]:+.1f}%" if pd.notna(row[LBL_YOY]) else "нет базы для сравнения"
+                st.warning(f"{row['ОП']} ({row['География']}): выполнение {exec_text}; динамика к {BASE_YEAR} году {yoy_text}.")
 
     with dynamics_tab:
-        st.subheader("Факт 2025 и 2026 по месяцам")
+        st.subheader(f"Факт {BASE_YEAR} и {CURR_YEAR} по месяцам")
         trend_fig = go.Figure()
-        trend_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly["Факт 2025"], mode="lines+markers", name="Факт 2025"))
-        trend_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly["Факт 2026"], mode="lines+markers", name="Факт 2026"))
+        trend_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_FACT_BASE], mode="lines+markers", name=LBL_FACT_BASE))
+        trend_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_FACT_CURR], mode="lines+markers", name=LBL_FACT_CURR))
         trend_fig.update_layout(hovermode="x unified", yaxis_title="Значение из выгрузки", xaxis_title="Месяц")
         st.plotly_chart(trend_fig, width="stretch")
 
         st.subheader("Накопительный итог с начала года")
         cumulative_fig = go.Figure()
-        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly["Накопительный факт 2025"], mode="lines+markers", name="Факт 2025 YTD"))
-        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly["Накопительный факт 2026"], mode="lines+markers", name="Факт 2026 YTD"))
-        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly["Накопительный план 2026"], mode="lines+markers", name="План 2026 YTD", line=dict(dash="dash")))
+        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_CUM_FACT_BASE], mode="lines+markers", name=f"{LBL_FACT_BASE} YTD"))
+        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_CUM_FACT_CURR], mode="lines+markers", name=f"{LBL_FACT_CURR} YTD"))
+        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_CUM_PLAN_CURR], mode="lines+markers", name=f"{LBL_PLAN_CURR} YTD", line=dict(dash="dash")))
         cumulative_fig.update_layout(hovermode="x unified", yaxis_title="Накопительное значение", xaxis_title="Месяц")
         st.plotly_chart(cumulative_fig, width="stretch")
 
-        st.subheader("Факт и план 2026 по месяцам")
+        st.subheader(f"Факт и план {CURR_YEAR} по месяцам")
         plan_fig = go.Figure()
-        plan_fig.add_trace(go.Bar(x=monthly["Месяц"], y=monthly["Факт 2026"], name="Факт 2026"))
-        plan_fig.add_trace(go.Bar(x=monthly["Месяц"], y=monthly["План 2026"], name="План 2026"))
+        plan_fig.add_trace(go.Bar(x=monthly["Месяц"], y=monthly[LBL_FACT_CURR], name=LBL_FACT_CURR))
+        plan_fig.add_trace(go.Bar(x=monthly["Месяц"], y=monthly[LBL_PLAN_CURR], name=LBL_PLAN_CURR))
         plan_fig.update_layout(barmode="group", yaxis_title="Значение из выгрузки", xaxis_title="Месяц")
         st.plotly_chart(plan_fig, width="stretch")
         st.dataframe(_display_df(monthly), width="stretch", hide_index=True)
 
     with structure_tab:
-        st.subheader(f"ТОП-10 {dimension.lower()} по факту 2026")
-        top10 = by_dimension.head(10).sort_values("Факт 2026", ascending=True)
-        top_fig = px.bar(top10, x="Факт 2026", y=dimension, orientation="h", text="Факт 2026")
+        st.subheader(f"ТОП-10 {dimension.lower()} по факту {CURR_YEAR}")
+        top10 = by_dimension.head(10).sort_values(LBL_FACT_CURR, ascending=True)
+        top_fig = px.bar(top10, x=LBL_FACT_CURR, y=dimension, orientation="h", text=LBL_FACT_CURR)
         top_fig.update_layout(yaxis_title="", xaxis_title="Значение из выгрузки", height=520)
         st.plotly_chart(top_fig, width="stretch")
 
-        st.subheader("Направления с наибольшим снижением к 2025 году")
-        declines = by_dimension[by_dimension["Изменение к 2025, %"].notna()].sort_values("Изменение к 2025, %").head(10)
+        st.subheader(f"Направления с наибольшим снижением к {BASE_YEAR} году")
+        declines = by_dimension[by_dimension[LBL_YOY].notna()].sort_values(LBL_YOY).head(10)
         if declines.empty:
             st.info("Нет направлений с базой для сравнения.")
         else:
-            decline_show = declines[[dimension, "Факт 2025", "Факт 2026", "Изменение к 2025, %", "Выполнение, %", "Статус"]].copy()
-            decline_show["Изменение к 2025, %"] = decline_show["Изменение к 2025, %"].round(1)
+            decline_show = declines[[dimension, LBL_FACT_BASE, LBL_FACT_CURR, LBL_YOY, "Выполнение, %", "Статус"]].copy()
+            decline_show[LBL_YOY] = decline_show[LBL_YOY].round(1)
             decline_show["Выполнение, %"] = decline_show["Выполнение, %"].round(1)
             st.dataframe(_display_df(decline_show), width="stretch", hide_index=True)
 
         st.subheader("Полная структура")
-        structure_show = by_dimension[[dimension, "Факт 2026", "Доля в продажах, %", "План 2026", "Выполнение, %", "Изменение к 2025, %", "Статус"]].copy()
-        for col in ["Доля в продажах, %", "Выполнение, %", "Изменение к 2025, %"]:
+        structure_show = by_dimension[[dimension, LBL_FACT_CURR, "Доля в продажах, %", LBL_PLAN_CURR, "Выполнение, %", LBL_YOY, "Статус"]].copy()
+        for col in ["Доля в продажах, %", "Выполнение, %", LBL_YOY]:
             structure_show[col] = structure_show[col].round(1)
         st.dataframe(_display_df(structure_show), width="stretch", hide_index=True)
 
@@ -424,18 +438,18 @@ def render(ctx):
         st.dataframe(_display_df(by_dimension), width="stretch", hide_index=True)
 
         summary = pd.DataFrame([
-            {"Показатель": "Факт 2026", "Значение": fact26},
-            {"Показатель": "План 2026", "Значение": plan26},
+            {"Показатель": LBL_FACT_CURR, "Значение": fact_curr_total},
+            {"Показатель": LBL_PLAN_CURR, "Значение": plan_curr_total},
             {"Показатель": "Выполнение плана, %", "Значение": execution},
-            {"Показатель": "Факт 2025", "Значение": fact25},
-            {"Показатель": "Изменение к 2025, %", "Значение": yoy},
+            {"Показатель": LBL_FACT_BASE, "Значение": fact_base_total},
+            {"Показатель": LBL_YOY, "Значение": yoy},
             {"Показатель": "Отклонение от плана", "Значение": gap},
         ])
         report = _excel_report(summary, by_op, by_dimension, monthly, filtered)
         st.download_button(
             "📥 Скачать отчёт Excel",
             data=report,
-            file_name=f"ETM_аналитика_{kind}_{period_end:02d}_2026.xlsx",
+            file_name=f"ETM_аналитика_{kind}_{period_end:02d}_{CURR_YEAR}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width="stretch",
         )
