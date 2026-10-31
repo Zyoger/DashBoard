@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# IDE
+.idea/
+
+# Загружаемые пользователем данные (не коммитим)
+data/*.xlsx
+
+# Служебные выгрузки
+structure.txt
