@@ -187,7 +187,7 @@ with st.sidebar:
             sheet_name, dimension = ETM_SHEETS[etm_kind]
             try:
                 file_bytes = ETM_PATH.read_bytes()
-                etm_df = tab_etm._read_etm(file_bytes, sheet_name)
+                etm_df, etm_fact_months = tab_etm._read_etm(file_bytes, sheet_name)
 
                 filter_fields = [
                     "Макрорегион ДКС", "География", "Тип подразделения",
@@ -247,12 +247,12 @@ with st.sidebar:
                 else:
                     filtered_etm = filtered_etm.iloc[0:0]
 
-                available_months = sorted(tab_etm.FACT_2026.keys())
+                available_months = etm_fact_months
                 period_end = st.selectbox(
                     "Период по",
                     available_months,
                     index=len(available_months) - 1,
-                    format_func=lambda month: f"{tab_etm.MONTHS[month - 1]} 2026",
+                    format_func=lambda month: f"{tab_etm.MONTHS[month - 1]} {tab_etm.CURR_YEAR}",
                     key="etm_sidebar_period_end",
                 )
                 if st.button("↩️ Сбросить фильтры ЭТМ", key="etm_sidebar_reset"):
@@ -269,6 +269,7 @@ with st.sidebar:
                     "selected_filters": selected_filters,
                     "selected_dimensions": selected_dimensions,
                     "period_end": period_end,
+                    "fact_months": etm_fact_months,
                 }
             except Exception as exc:
                 etm_error = str(exc)

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from io import BytesIO
 
@@ -9,32 +10,59 @@ import streamlit as st
 
 ETM_PATH = Path("data/etm.xlsx")
 
-DIM_COLS = {
-    "ПОК": 0,
-    "РК": 1,
-    "ДП": 2,
-    "Макрорегион ДКС": 3,
-    "ОП": 4,
-    "37 кл": 5,
-}
+# Годы анализа: базовый (факт прошлого года) и отчётный (план + факт).
+BASE_YEAR = 2025
+CURR_YEAR = 2026
+
+DIM_NAMES = ["ПОК", "РК", "ДП", "Макрорегион ДКС", "ОП", "37 кл"]
+DIMENSION_NAMES = ("Специализация", "Товарная категория")
 
 MONTHS = [
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 ]
 
-FACT_2025 = {
-    1: 7, 2: 8, 3: 9, 4: 11, 5: 12, 6: 13,
-    7: 15, 8: 16, 9: 17, 10: 19, 11: 20, 12: 21,
+_MONTH_NUM = {name.casefold(): i + 1 for i, name in enumerate(MONTHS)}
+_MONTH_ABBR = {
+    "янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "июн": 6,
+    "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12,
 }
-PLAN_2026 = {
-    1: 24, 2: 25, 3: 26, 4: 28, 5: 29, 6: 30,
-    7: 32, 8: 33, 9: 34, 10: 36, 11: 37, 12: 38,
-}
-FACT_2026 = {
-    1: 41, 2: 44, 3: 50, 4: 56, 5: 62,
-    6: 68, 7: 78, 8: 84, 9: 90, 10: 100,
-}
+
+
+def _find_header_row(raw: pd.DataFrame, max_rows: int = 10) -> int:
+    """Строка заголовков — та, где первая колонка равна «ПОК»."""
+    for row_idx in range(min(max_rows, raw.shape[0])):
+        if str(raw.iat[row_idx, 0]).strip().casefold() == "пок":
+            return row_idx
+    raise ValueError("Не найдена строка заголовков (колонка «ПОК»).")
+
+
+def _month_columns(header: pd.Series, year: int, kind: str) -> dict[int, int]:
+    """Находит колонки месяцев по тексту заголовков.
+
+    kind="fact": заголовки вида «Январь 2026» (полное название + год).
+    kind="plan": заголовки вида «ГО план янв26» (сокращение + две цифры года).
+    Квартальные («1 кв.2026») и итоговые («ГО план 2026») колонки
+    этим шаблонам не соответствуют и пропускаются.
+
+    Возвращает {номер_месяца: индекс_колонки}.
+    """
+    result: dict[int, int] = {}
+    for idx, value in header.items():
+        if not isinstance(value, str):
+            continue
+        text = value.strip().casefold()
+        if kind == "plan":
+            match = re.fullmatch(
+                r"го\s+план\s+([а-яё]{3})\s*" + str(year)[-2:], text
+            )
+            if match and match.group(1) in _MONTH_ABBR:
+                result[_MONTH_ABBR[match.group(1)]] = idx
+        else:
+            match = re.fullmatch(r"([а-яё]+)\s+" + str(year), text)
+            if match and match.group(1) in _MONTH_NUM:
+                result[_MONTH_NUM[match.group(1)]] = idx
+    return result
 
 NORTH_CITIES = ("Ярославль", "Тверь", "Владимир", "Кострома", "Иваново")
 
@@ -45,29 +73,75 @@ def _city_zone(op_name) -> str:
 
 
 @st.cache_data(show_spinner="Читаю выгрузку ЭТМ…")
-def _read_etm(file_bytes: bytes, sheet_name: str) -> pd.DataFrame:
+def _read_etm(file_bytes: bytes, sheet_name: str) -> tuple[pd.DataFrame, list[int]]:
+    """Читает лист выгрузки ЭТМ.
+
+    Колонки находятся по тексту заголовков, а не по фиксированным позициям,
+    поэтому добавление новых месяцев (например, ноября и декабря факта)
+    и сдвиги колонок в выгрузке не ломают парсер.
+
+    Возвращает (данные, отсортированный список месяцев с фактом отчётного года).
+    """
     raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=None)
-    if raw.shape[0] < 4 or raw.shape[1] < 101:
-        raise ValueError(f"Лист «{sheet_name}» имеет неожиданную структуру: {raw.shape}")
 
-    dimension_name = str(raw.iat[2, 6]).strip()
-    if dimension_name not in ("Специализация", "Товарная категория"):
-        raise ValueError(f"Неожиданный заголовок в G3 листа «{sheet_name}»: {dimension_name}")
+    header_row = _find_header_row(raw)
+    header = raw.iloc[header_row]
 
-    body = raw.iloc[3:].reset_index(drop=True)
-    data = pd.DataFrame({name: body.iloc[:, idx] for name, idx in DIM_COLS.items()})
-    data[dimension_name] = body.iloc[:, 6]
+    # Колонки измерений — по именам заголовков.
+    dim_cols: dict[str, int] = {}
+    dimension_col = None
+    for idx, value in header.items():
+        name = str(value).strip()
+        if name in DIM_NAMES and name not in dim_cols:
+            dim_cols[name] = idx
+        if name in DIMENSION_NAMES and dimension_col is None:
+            dimension_col = idx
+    missing = [name for name in DIM_NAMES if name not in dim_cols]
+    if missing:
+        raise ValueError(
+            f"Лист «{sheet_name}»: не найдены колонки измерений: {missing}"
+        )
+    if dimension_col is None:
+        raise ValueError(
+            f"Лист «{sheet_name}»: не найдена колонка разреза "
+            f"(«Специализация» или «Товарная категория»)"
+        )
+    dimension_name = str(header.iloc[dimension_col]).strip()
+
+    # Колонки месяцев — по шаблонам заголовков.
+    fact_base = _month_columns(header, BASE_YEAR, "fact")
+    plan_curr = _month_columns(header, CURR_YEAR, "plan")
+    fact_curr = _month_columns(header, CURR_YEAR, "fact")
+    if not fact_base:
+        raise ValueError(
+            f"Лист «{sheet_name}»: не найдены колонки факта {BASE_YEAR} "
+            f"(«Январь {BASE_YEAR}» и т.д.)"
+        )
+    if not plan_curr:
+        raise ValueError(
+            f"Лист «{sheet_name}»: не найдены колонки плана {CURR_YEAR} "
+            f"(«ГО план янв{str(CURR_YEAR)[-2:]}» и т.д.)"
+        )
+    if not fact_curr:
+        raise ValueError(
+            f"Лист «{sheet_name}»: не найдены колонки факта {CURR_YEAR} "
+            f"(«Январь {CURR_YEAR}» и т.д.)"
+        )
+
+    body = raw.iloc[header_row + 1:].reset_index(drop=True)
+    data = pd.DataFrame({name: body.iloc[:, idx] for name, idx in dim_cols.items()})
+    data[dimension_name] = body.iloc[:, dimension_col]
     data["География"] = data["ОП"].map(_city_zone)
 
-    for month, idx in FACT_2025.items():
-        data[f"Факт_{month}_2025"] = pd.to_numeric(body.iloc[:, idx], errors="coerce").fillna(0)
-    for month, idx in PLAN_2026.items():
-        data[f"План_{month}_2026"] = pd.to_numeric(body.iloc[:, idx], errors="coerce").fillna(0)
-    for month, idx in FACT_2026.items():
-        data[f"Факт_{month}_2026"] = pd.to_numeric(body.iloc[:, idx], errors="coerce").fillna(0)
+    for month, idx in fact_base.items():
+        data[f"Факт_{month}_{BASE_YEAR}"] = pd.to_numeric(body.iloc[:, idx], errors="coerce").fillna(0)
+    for month, idx in plan_curr.items():
+        data[f"План_{month}_{CURR_YEAR}"] = pd.to_numeric(body.iloc[:, idx], errors="coerce").fillna(0)
+    for month, idx in fact_curr.items():
+        data[f"Факт_{month}_{CURR_YEAR}"] = pd.to_numeric(body.iloc[:, idx], errors="coerce").fillna(0)
 
     # Исключаем строки итогов, чтобы не задваивать суммы при группировках.
-    text_cols = list(DIM_COLS) + [dimension_name]
+    text_cols = DIM_NAMES + [dimension_name]
     summary_mask = data[text_cols].astype(str).apply(
         lambda col: col.str.contains(r"итог|всего", case=False, na=False)
     ).any(axis=1)
@@ -92,7 +166,7 @@ def _read_etm(file_bytes: bytes, sheet_name: str) -> pd.DataFrame:
     data["Тип подразделения"] = data["ОП"].str.contains(r"ВТЦ", case=False, na=False).map(
         {True: "ВТЦ", False: "ОП"}
     )
-    return data.reset_index(drop=True)
+    return data.reset_index(drop=True), sorted(fact_curr)
 
 
 def _fmt(value) -> str:
@@ -182,11 +256,11 @@ def render(ctx):
         st.warning("По выбранным фильтрам нет данных. Измените параметры фильтрации.")
         return
 
-    available_months = sorted(FACT_2026.keys())
+    available_months = etm_context["fact_months"]
     months = [month for month in available_months if month <= period_end]
-    actual_cols = [f"Факт_{month}_2026" for month in months]
-    plan_cols = [f"План_{month}_2026" for month in months]
-    fact25_cols = [f"Факт_{month}_2025" for month in months]
+    actual_cols = [f"Факт_{month}_{CURR_YEAR}" for month in months]
+    plan_cols = [f"План_{month}_{CURR_YEAR}" for month in months]
+    fact25_cols = [f"Факт_{month}_{BASE_YEAR}" for month in months]
 
     fact26 = float(filtered[actual_cols].sum().sum())
     plan26 = float(filtered[plan_cols].sum().sum())
@@ -221,9 +295,9 @@ def render(ctx):
 
     monthly_rows = []
     for month in months:
-        a26 = float(filtered[f"Факт_{month}_2026"].sum())
-        p26 = float(filtered[f"План_{month}_2026"].sum())
-        a25 = float(filtered[f"Факт_{month}_2025"].sum())
+        a26 = float(filtered[f"Факт_{month}_{CURR_YEAR}"].sum())
+        p26 = float(filtered[f"План_{month}_{CURR_YEAR}"].sum())
+        a25 = float(filtered[f"Факт_{month}_{BASE_YEAR}"].sum())
         monthly_rows.append({
             "Месяц": MONTHS[month - 1],
             "Факт 2025": a25,
