@@ -1,5 +1,4 @@
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -85,15 +84,41 @@ def render(ctx):
 
     monthly = (period.groupby(["Город", "Год", "Месяц"])["Сумма_без_НДС"]
                .sum().reset_index())
-    monthly["Месяц_назв"] = monthly["Месяц"].map(lambda m: MONTH_NAMES[int(m) - 1])
-    monthly["Год"] = monthly["Год"].astype(str)
-    fig2 = px.line(monthly, x="Месяц_назв", y="Сумма_без_НДС",
-                   color="Город", line_dash="Год", markers=True,
-                   category_orders={"Месяц_назв": [MONTH_NAMES[m - 1] for m in common],
-                                    "Год": [str(base_year), str(curr_year)]})
-    fig2.update_layout(yaxis_title="Сумма без НДС, руб", xaxis_title="Месяц",
-                       hovermode="x unified")
-    st.plotly_chart(fig2, width="stretch")
+
+    cities_sorted = (period[period["Год"] == curr_year]
+                     .groupby("Город")["Сумма_без_НДС"].sum()
+                     .sort_values(ascending=False).index.tolist())
+    # города без продаж отчётного года — в конец
+    cities_sorted += [c for c in cities if c not in cities_sorted]
+
+    charts_per_row = 2
+    for row_start in range(0, len(cities_sorted), charts_per_row):
+        cols = st.columns(charts_per_row)
+        for col, city in zip(cols, cities_sorted[row_start:row_start + charts_per_row]):
+            city_data = monthly[monthly["Город"] == city]
+            fig_city = go.Figure()
+            for year, dash in ((base_year, "dash"), (curr_year, "solid")):
+                year_data = city_data[city_data["Год"] == year].sort_values("Месяц")
+                if year_data.empty:
+                    continue
+                fig_city.add_trace(go.Scatter(
+                    x=[MONTH_NAMES[int(m) - 1] for m in year_data["Месяц"]],
+                    y=year_data["Сумма_без_НДС"],
+                    mode="lines+markers",
+                    name=str(year),
+                    line=dict(dash=dash),
+                ))
+            fig_city.update_layout(
+                title=city,
+                yaxis_title="Сумма без НДС, руб",
+                xaxis_title="",
+                hovermode="x unified",
+                legend_title="Год",
+                height=320,
+                margin=dict(t=50, b=30),
+            )
+            with col:
+                st.plotly_chart(fig_city, width="stretch")
 
     # ---------- YoY по месяцам (все филиалы) ----------
     m_base = (period[period["Год"] == base_year]
