@@ -1,0 +1,9 @@
+{
+  "name": "sales-dashboard-co",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Дашборд «Продажи ЦО» (Streamlit)",
+  "scripts": {
+    "dev": "node dev.js"
+  }
+}
