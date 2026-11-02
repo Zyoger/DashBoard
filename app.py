@@ -32,6 +32,8 @@ if "plan_bytes" not in st.session_state:
     st.session_state["plan_bytes"] = None
 if "etm_bytes" not in st.session_state:
     st.session_state["etm_bytes"] = None
+if "project_bytes" not in st.session_state:
+    st.session_state["project_bytes"] = None
 if "plans_df" not in st.session_state:
     # стартовый план из data/plans.csv, если файл есть в репозитории
     st.session_state["plans_df"] = load_plans()
@@ -47,6 +49,11 @@ def _multiselect(label, options, key, default=None):
         st.session_state[key] = [value for value in current if value in options]
         return st.multiselect(label, options, key=key)
     return st.multiselect(label, options, default=default, key=key)
+
+
+def _project_multiselect(label, series, key):
+    options = sorted(series.dropna().astype(str).unique().tolist())
+    return _multiselect(label, options, key, default=options)
 
 
 # =====================================================================
@@ -114,6 +121,31 @@ with st.sidebar:
             st.cache_data.clear()
             st.rerun()
 
+        st.divider()
+        st.caption("Проектное взаимодействие")
+        project_upload = st.file_uploader(
+            "Файл проектного взаимодействия (.xlsx)", type=["xlsx"], key="project_file_uploader"
+        )
+        if project_upload is not None:
+            payload = project_upload.getvalue()
+            if payload != st.session_state["project_bytes"]:
+                st.session_state["project_bytes"] = payload
+                for state_key in list(st.session_state.keys()):
+                    if state_key.startswith("project_") and state_key != "project_bytes":
+                        st.session_state.pop(state_key, None)
+                st.cache_data.clear()
+            st.success(f"Файл проектов: {project_upload.name}")
+
+        if st.session_state["project_bytes"] is not None and st.button(
+            "🗑 Очистить файл проектного взаимодействия", key="clear_project"
+        ):
+            st.session_state["project_bytes"] = None
+            for state_key in list(st.session_state.keys()):
+                if state_key.startswith("project_") and state_key != "project_bytes":
+                    st.session_state.pop(state_key, None)
+            st.cache_data.clear()
+            st.rerun()
+
         st.caption("Файлы обрабатываются в памяти и нигде не сохраняются.")
 
     # ------------------------- ПРОДАЖИ -------------------------------
@@ -177,14 +209,15 @@ with st.sidebar:
     etm_context = None
     etm_error = None
 
-    with st.expander("🟧 Фильтры ЭТМ", expanded=False):
-        etm_kind = st.radio(
-            "Разрез аналитики",
-            list(ETM_SHEETS),
-            horizontal=False,
-            key="etm_kind_sidebar",
-        )
-        if st.session_state["etm_bytes"] is not None:
+    # Фильтры ЭТМ показываем только после загрузки файла.
+    if st.session_state["etm_bytes"] is not None:
+        with st.expander("🟧 Фильтры ЭТМ", expanded=False):
+            etm_kind = st.radio(
+                "Разрез аналитики",
+                list(ETM_SHEETS),
+                horizontal=False,
+                key="etm_kind_sidebar",
+            )
             sheet_name, dimension = ETM_SHEETS[etm_kind]
             try:
                 etm_df, etm_fact_months = tab_etm._read_etm(
@@ -250,13 +283,18 @@ with st.sidebar:
                     filtered_etm = filtered_etm.iloc[0:0]
 
                 available_months = etm_fact_months
-                period_end = st.selectbox(
-                    "Период по",
-                    available_months,
-                    index=len(available_months) - 1,
-                    format_func=lambda month: f"{tab_etm.MONTHS[month - 1]} {tab_etm.CURR_YEAR}",
-                    key="etm_sidebar_period_end",
-                )
+                if available_months:
+                    period_end = st.selectbox(
+                        "Период по",
+                        available_months,
+                        index=len(available_months) - 1,
+                        format_func=lambda month: f"{tab_etm.MONTHS[month - 1]} {tab_etm.CURR_YEAR}",
+                        key="etm_sidebar_period_end",
+                    )
+                else:
+                    period_end = None
+                    st.warning("В загруженной выгрузке ЭТМ не найдены месяцы с фактическими данными.")
+
                 if st.button("↩️ Сбросить фильтры ЭТМ", key="etm_sidebar_reset"):
                     _reset_etm_filters()
                     st.rerun()
@@ -274,32 +312,109 @@ with st.sidebar:
             except Exception as exc:
                 etm_error = str(exc)
                 st.error(f"Не удалось прочитать выгрузку ЭТМ: {exc}")
-        else:
-            st.info("Загрузите файл ЭТМ в разделе «Загрузка данных», чтобы открыть аналитику ЭТМ.")
+
+    # ---------------------- ПРОЕКТНОЕ ВЗАИМОДЕЙСТВИЕ ----------------------
+    project_df = None
+    project_filtered_df = None
+    project_error = None
+    project_filters = {}
+    if st.session_state["project_bytes"] is not None:
+        try:
+            project_df = tab_project.parse_project_file(st.session_state["project_bytes"])
+            with st.expander("🤝 Фильтры проектного взаимодействия", expanded=False):
+                project_distributors = _project_multiselect(
+                    "Дистрибьютор / филиал", project_df["Дистрибьютор"], "project_sidebar_dist"
+                )
+                city_source = project_df[
+                    project_df["Дистрибьютор"].astype(str).isin(project_distributors)
+                ] if project_distributors else project_df.iloc[0:0]
+                project_cities = _project_multiselect(
+                    "Город", city_source["Город"], "project_sidebar_city"
+                )
+                project_industries = _project_multiselect(
+                    "Подотрасль", project_df["Подотрасль"], "project_sidebar_industry"
+                )
+                project_stages = _project_multiselect(
+                    "Стадия", project_df["Стадия"], "project_sidebar_stage"
+                )
+                project_managers = _project_multiselect(
+                    "Ответственный", project_df["Ответственный"], "project_sidebar_manager"
+                )
+                project_clients = _project_multiselect(
+                    "Конечный клиент", project_df["Конечный клиент"], "project_sidebar_client"
+                )
+                valid_project_dates = project_df["Дата создания"].dropna()
+                if not valid_project_dates.empty:
+                    project_date_min = valid_project_dates.min().date()
+                    project_date_max = valid_project_dates.max().date()
+                    project_date_range = st.date_input(
+                        "Период создания записей",
+                        value=(project_date_min, project_date_max),
+                        min_value=project_date_min,
+                        max_value=project_date_max,
+                        key="project_sidebar_date_range",
+                    )
+                else:
+                    project_date_range = ()
+                if st.button("↩️ Сбросить фильтры проектов", key="project_sidebar_reset"):
+                    for state_key in list(st.session_state.keys()):
+                        if state_key.startswith("project_sidebar_"):
+                            st.session_state.pop(state_key, None)
+                    st.rerun()
+
+            project_filtered_df = project_df[
+                project_df["Дистрибьютор"].astype(str).isin(project_distributors)
+                & project_df["Город"].astype(str).isin(project_cities)
+                & project_df["Подотрасль"].astype(str).isin(project_industries)
+                & project_df["Стадия"].astype(str).isin(project_stages)
+                & project_df["Ответственный"].astype(str).isin(project_managers)
+                & project_df["Конечный клиент"].astype(str).isin(project_clients)
+            ].copy()
+            if isinstance(project_date_range, (tuple, list)) and len(project_date_range) == 2:
+                project_start, project_end = project_date_range
+                project_filtered_df = project_filtered_df[
+                    project_filtered_df["Дата создания"].dt.date.between(project_start, project_end)
+                ]
+            project_filters = {
+                "distributors": project_distributors,
+                "cities": project_cities,
+                "industries": project_industries,
+                "stages": project_stages,
+                "managers": project_managers,
+                "clients": project_clients,
+                "date_range": project_date_range,
+            }
+        except Exception as exc:
+            project_error = str(exc)
+            st.error(f"Не удалось прочитать файл проектного взаимодействия: {exc}")
+    else:
+        project_df = None
+        project_filtered_df = None
+        project_error = None
 
 # =====================================================================
 # СТАРТОВЫЙ ЭКРАН — пока не загружен ни один источник данных
 # =====================================================================
-if st.session_state["sales_bytes"] is None and st.session_state["etm_bytes"] is None:
+if (st.session_state["sales_bytes"] is None
+        and st.session_state["etm_bytes"] is None
+        and st.session_state["project_bytes"] is None):
     st.title("📊 Продажи ЦО")
     st.markdown(
         """
         Дашборд аналитики продаж Центрального округа.
 
         **Что внутри:**
-        - **📈 Динамика** — KPI, YoY, план/факт по кварталам, автосигналы,
-          плитки по городам и сводная таблица «дистрибьютор → город»;
-        - **🟧 ЭТМ** — выполнение плана и динамика по офисам продаж,
-          разрезы по товарным категориям и специализациям, зоны внимания;
-        - **🟦 Русский Свет** — продажи по филиалам, месячные планы
-          и их выполнение, структура по группам продукции;
-        - **🤝 Проектное взаимодействие** и **👥 Партнеры** — в разработке.
+        - **📈 Динамика** — KPI, YoY, план/факт и сводная таблица «дистрибьютор → город»;
+        - **🤝 Проектное взаимодействие** — проекты, стадии, стоимость предложений,
+          заказы, аналитика по дистрибьюторам и детализация;
+        - **🟧 ЭТМ** — выполнение плана и динамика по офисам продаж;
+        - **🟦 Русский Свет** и **👥 Партнеры** — остальные разделы приложения.
 
         **Как начать:**
         1. Откройте слева раздел **«📂 Загрузка данных»**;
-        2. Загрузите выгрузку продаж (.xlsx) и/или файл ЭТМ (.xlsx) —
-           вкладки откроются автоматически;
-        3. При необходимости настройте фильтры в боковой панели.
+        2. Загрузите нужный источник: продажи, ЭТМ или проектное взаимодействие;
+        3. Для вкладки проектов файл продаж не требуется;
+        4. При необходимости настройте фильтры в боковой панели.
 
         Файлы обрабатываются только в памяти сессии и нигде не сохраняются.
         """
@@ -322,6 +437,10 @@ ctx = {
     "sales_error": sales_error,
     "etm": etm_context,
     "etm_error": etm_error,
+    "project_df": project_df,
+    "project_filtered_df": project_filtered_df,
+    "project_filters": project_filters,
+    "project_error": project_error,
 }
 
 # =====================================================================
@@ -344,10 +463,7 @@ with tab1:
         tab_dynamics.render(ctx)
 
 with tab2:
-    if sales is None:
-        st.info("Для работы раздела загрузите файл продаж в боковой панели.")
-    else:
-        tab_project.render(ctx)
+    tab_project.render(ctx)
 
 with tab3:
     if sales is None:
