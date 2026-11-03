@@ -331,6 +331,28 @@ def render(ctx):
         k4.metric("Отклонение от плана", _fmt(gap), delta="выше плана" if gap >= 0 else "ниже плана", delta_color="normal" if gap >= 0 else "inverse")
         k5.metric(LBL_FACT_BASE, _fmt(fact_base_total))
 
+        st.subheader("Динамика по месяцам")
+        month_names = [MONTHS[m - 1] for m in months]
+        dyn_fig = go.Figure()
+        dyn_fig.add_trace(go.Scatter(
+            x=month_names, y=monthly[LBL_FACT_BASE],
+            mode="lines+markers", name=LBL_FACT_BASE,
+            line=dict(dash="dash"),
+        ))
+        dyn_fig.add_trace(go.Scatter(
+            x=month_names, y=monthly[LBL_FACT_CURR],
+            mode="lines+markers", name=LBL_FACT_CURR,
+        ))
+        dyn_fig.add_trace(go.Scatter(
+            x=month_names, y=monthly[LBL_PLAN_CURR],
+            mode="lines+markers", name=LBL_PLAN_CURR,
+            line=dict(dash="dot"),
+        ))
+        dyn_fig.update_layout(hovermode="x unified",
+                              yaxis_title="Значение из выгрузки",
+                              xaxis_title="Месяц")
+        st.plotly_chart(dyn_fig, width="stretch")
+
         st.subheader("Сравнение Севера и Юга")
         if not by_geo.empty:
             geo_show = by_geo[["География", LBL_FACT_CURR, LBL_PLAN_CURR, "Выполнение, %", LBL_FACT_BASE, LBL_YOY]].copy()
