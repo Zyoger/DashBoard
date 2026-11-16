@@ -7,6 +7,8 @@ from data_loader import load_sales
 from plans import load_plans, parse_plans
 from tabs import tab_dynamics, tab_project, tab_rs, tab_etm, tab_partners
 
+APP_VERSION = "1.0.4"
+
 st.set_page_config(page_title="Продажи ЦО", layout="wide")
 
 ETM_SHEETS = {
@@ -28,10 +30,14 @@ def _reset_etm_filters():
 # на диск ничего не записывается.
 if "sales_bytes" not in st.session_state:
     st.session_state["sales_bytes"] = None
+if "sales_engine" not in st.session_state:
+    st.session_state["sales_engine"] = "openpyxl"
 if "plan_bytes" not in st.session_state:
     st.session_state["plan_bytes"] = None
 if "etm_bytes" not in st.session_state:
     st.session_state["etm_bytes"] = None
+if "etm_engine" not in st.session_state:
+    st.session_state["etm_engine"] = "openpyxl"
 if "project_bytes" not in st.session_state:
     st.session_state["project_bytes"] = None
 if "plans_df" not in st.session_state:
@@ -47,8 +53,11 @@ def _multiselect(label, options, key, default=None):
         if not isinstance(current, list):
             current = []
         st.session_state[key] = [value for value in current if value in options]
-        return st.multiselect(label, options, key=key)
-    return st.multiselect(label, options, default=default, key=key)
+    else:
+        # Явно задаём состояние: после сброса Streamlit не должен
+        # восстанавливать прежний пустой выбор существующего виджета.
+        st.session_state[key] = list(default) if default is not None else []
+    return st.multiselect(label, options, key=key)
 
 
 def _project_multiselect(label, series, key):
@@ -61,16 +70,20 @@ def _project_multiselect(label, series, key):
 # =====================================================================
 with st.sidebar:
     st.title("Параметры отчёта")
+    st.caption(f"Версия приложения: **{APP_VERSION}**")
 
     with st.expander("📂 Загрузка данных", expanded=True):
         st.caption("Основная выгрузка продаж")
         sales_upload = st.file_uploader(
-            "Файл продаж (.xlsx)", type=["xlsx"], key="sales_file_uploader"
+            "Файл продаж (.xlsx или .xlsb)", type=["xlsx", "xlsb"], key="sales_file_uploader"
         )
         if sales_upload is not None:
             payload = sales_upload.getvalue()
             if payload != st.session_state["sales_bytes"]:
                 st.session_state["sales_bytes"] = payload
+                st.session_state["sales_engine"] = (
+                    "pyxlsb" if sales_upload.name.lower().endswith(".xlsb") else "openpyxl"
+                )
                 for state_key in SALES_FILTER_KEYS:
                     st.session_state.pop(state_key, None)
                 st.cache_data.clear()
@@ -103,12 +116,15 @@ with st.sidebar:
         st.divider()
         st.caption("Выгрузка ЭТМ")
         etm_upload = st.file_uploader(
-            "Файл ЭТМ (.xlsx)", type=["xlsx"], key="etm_file_uploader"
+            "Файл ЭТМ (.xlsx или .xlsb)", type=["xlsx", "xlsb"], key="etm_file_uploader"
         )
         if etm_upload is not None:
             payload = etm_upload.getvalue()
             if payload != st.session_state["etm_bytes"]:
                 st.session_state["etm_bytes"] = payload
+                st.session_state["etm_engine"] = (
+                    "pyxlsb" if etm_upload.name.lower().endswith(".xlsb") else "openpyxl"
+                )
                 _reset_etm_filters()
                 st.cache_data.clear()
             st.success(f"Файл ЭТМ: {etm_upload.name}")
@@ -159,11 +175,14 @@ with st.sidebar:
 
     if st.session_state["sales_bytes"] is not None:
         @st.cache_data(show_spinner="Читаю файл продаж…")
-        def _load_sales(payload: bytes):
-            return load_sales(BytesIO(payload))
+        def _load_sales(payload: bytes, engine: str):
+            return load_sales(BytesIO(payload), engine=engine)
 
         try:
-            sales = _load_sales(st.session_state["sales_bytes"])
+            sales = _load_sales(
+                st.session_state["sales_bytes"],
+                st.session_state["sales_engine"],
+            )
             years = sorted(int(y) for y in sales["Год"].dropna().unique())
 
             with st.expander("🔎 Фильтры продаж", expanded=False):
@@ -221,21 +240,22 @@ with st.sidebar:
             sheet_name, dimension = ETM_SHEETS[etm_kind]
             try:
                 etm_df, etm_fact_months = tab_etm._read_etm(
-                    st.session_state["etm_bytes"], sheet_name
+                    st.session_state["etm_bytes"], sheet_name,
+                    engine=st.session_state["etm_engine"],
+                    expected_dimension=dimension,
                 )
 
                 filter_fields = [
                     "Макрорегион ДКС", "География", "Тип подразделения",
-                    "ОП", "РК", "ПОК",
+                    "ОП", "ПОК",
                 ]
                 selected_filters = {}
                 filter_keys = {
-                    "Макрорегион ДКС": "etm_sidebar_macro",
-                    "География": "etm_sidebar_geo",
-                    "Тип подразделения": "etm_sidebar_unit_type",
-                    "ОП": "etm_sidebar_op",
-                    "РК": "etm_sidebar_rk",
-                    "ПОК": "etm_sidebar_pok",
+                    "Макрорегион ДКС": "etm_sidebar_v104_macro",
+                    "География": "etm_sidebar_v104_geo",
+                    "Тип подразделения": "etm_sidebar_v104_unit_type",
+                    "ОП": "etm_sidebar_v104_op",
+                    "ПОК": "etm_sidebar_v104_pok",
                 }
 
                 for field in filter_fields:
@@ -248,12 +268,15 @@ with st.sidebar:
                             options_df[previous_field].astype(str).isin(chosen)
                         ]
                     options = sorted(options_df[field].dropna().astype(str).unique())
+                    default = options
                     if field == "Макрорегион ДКС":
-                        default = ["Центр (ЦО)"] if "Центр (ЦО)" in options else options
-                    else:
-                        default = options
+                        default = [value for value in options if value == "Центр (ЦО)"]
+                    elif field == "Тип подразделения":
+                        default = [value for value in options if value == "ОП"]
+                    elif field == "ПОК":
+                        default = [value for value in options if value.startswith("DKC (138+2572")]
                     selected_filters[field] = _multiselect(
-                        field, options, filter_keys[field], default
+                        field, options, filter_keys[field], default=default
                     )
 
                 filtered_etm = etm_df.copy()
@@ -272,7 +295,7 @@ with st.sidebar:
                 selected_dimensions = _multiselect(
                     dimension,
                     dimension_options,
-                    f"etm_sidebar_dimension_{etm_kind}",
+                    f"etm_sidebar_v104_dimension_{etm_kind}",
                     dimension_options,
                 )
                 if selected_dimensions:
@@ -284,20 +307,30 @@ with st.sidebar:
 
                 available_months = etm_fact_months
                 if available_months:
+                    period_start = st.selectbox(
+                        "Период с",
+                        available_months,
+                        format_func=lambda month: f"{tab_etm.MONTHS[month - 1]} {tab_etm.CURR_YEAR}",
+                        key="etm_sidebar_period_start",
+                    )
+                    end_months = [month for month in available_months if month >= period_start]
+                    end_key = "etm_sidebar_period_end"
+                    if st.session_state.get(end_key) not in end_months:
+                        st.session_state[end_key] = end_months[-1]
                     period_end = st.selectbox(
                         "Период по",
-                        available_months,
-                        index=len(available_months) - 1,
+                        end_months,
                         format_func=lambda month: f"{tab_etm.MONTHS[month - 1]} {tab_etm.CURR_YEAR}",
-                        key="etm_sidebar_period_end",
+                        key=end_key,
                     )
                 else:
-                    period_end = None
+                    period_start = period_end = None
                     st.warning("В загруженной выгрузке ЭТМ не найдены месяцы с фактическими данными.")
 
-                if st.button("↩️ Сбросить фильтры ЭТМ", key="etm_sidebar_reset"):
-                    _reset_etm_filters()
-                    st.rerun()
+                st.button(
+                    "↩️ Сбросить фильтры ЭТМ", key="etm_sidebar_reset",
+                    on_click=_reset_etm_filters,
+                )
 
                 etm_context = {
                     "df": etm_df,
@@ -306,6 +339,7 @@ with st.sidebar:
                     "dimension": dimension,
                     "selected_filters": selected_filters,
                     "selected_dimensions": selected_dimensions,
+                    "period_start": period_start,
                     "period_end": period_end,
                     "fact_months": etm_fact_months,
                 }

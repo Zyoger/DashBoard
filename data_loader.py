@@ -20,7 +20,7 @@ def _parse_month(label):
     return int(year), m, pd.Timestamp(year=int(year), month=m, day=1)
 
 
-def load_sales(path: str | Path) -> pd.DataFrame:
+def load_sales(path: str | Path, engine: str = "openpyxl") -> pd.DataFrame:
     """Читает лист 'Table'.
 
     Структура (0-based индексы колонок):
@@ -31,7 +31,7 @@ def load_sales(path: str | Path) -> pd.DataFrame:
         10..27 = K:AB = месяцы 'Январь 2025' … 'Сентябрь 2026'
         28 = AC = 'Общий результат' — игнорируем
     """
-    df = pd.read_excel(path, sheet_name="Table", header=15)
+    df = pd.read_excel(path, sheet_name="Table", header=15, engine=engine)
 
     df = df.rename(columns={
         df.columns[6]: "Город",

@@ -80,7 +80,12 @@ def _city_zone(op_name) -> str:
 
 
 @st.cache_data(show_spinner="Читаю выгрузку ЭТМ…")
-def _read_etm(file_bytes: bytes, sheet_name: str) -> tuple[pd.DataFrame, list[int]]:
+def _read_etm(
+    file_bytes: bytes,
+    sheet_name: str,
+    engine: str = "openpyxl",
+    expected_dimension: str | None = None,
+) -> tuple[pd.DataFrame, list[int]]:
     """Читает лист выгрузки ЭТМ.
 
     Колонки находятся по тексту заголовков, а не по фиксированным позициям,
@@ -89,7 +94,12 @@ def _read_etm(file_bytes: bytes, sheet_name: str) -> tuple[pd.DataFrame, list[in
 
     Возвращает (данные, отсортированный список месяцев с фактом отчётного года).
     """
-    raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=None)
+    raw = pd.read_excel(
+        BytesIO(file_bytes),
+        sheet_name=sheet_name,
+        header=None,
+        engine=engine,
+    )
 
     header_row = _find_header_row(raw)
     header = raw.iloc[header_row]
@@ -97,11 +107,16 @@ def _read_etm(file_bytes: bytes, sheet_name: str) -> tuple[pd.DataFrame, list[in
     # Колонки измерений — по именам заголовков.
     dim_cols: dict[str, int] = {}
     dimension_col = None
+    target_dimension = expected_dimension if expected_dimension in DIMENSION_NAMES else None
     for idx, value in header.items():
         name = str(value).strip()
         if name in DIM_NAMES and name not in dim_cols:
             dim_cols[name] = idx
-        if name in DIMENSION_NAMES and dimension_col is None:
+        # Если лист содержит обе колонки-разреза, используем ту,
+        # которая соответствует выбранному листу, а не первую попавшуюся.
+        if target_dimension and name == target_dimension:
+            dimension_col = idx
+        elif not target_dimension and name in DIMENSION_NAMES and dimension_col is None:
             dimension_col = idx
     missing = [name for name in DIM_NAMES if name not in dim_cols]
     if missing:
@@ -109,9 +124,9 @@ def _read_etm(file_bytes: bytes, sheet_name: str) -> tuple[pd.DataFrame, list[in
             f"Лист «{sheet_name}»: не найдены колонки измерений: {missing}"
         )
     if dimension_col is None:
+        wanted = target_dimension or "«Специализация» или «Товарная категория»"
         raise ValueError(
-            f"Лист «{sheet_name}»: не найдена колонка разреза "
-            f"(«Специализация» или «Товарная категория»)"
+            f"Лист «{sheet_name}»: не найдена ожидаемая колонка разреза {wanted}"
         )
     dimension_name = str(header.iloc[dimension_col]).strip()
 
@@ -257,6 +272,7 @@ def render(ctx):
     kind = etm_context["kind"]
     dimension = etm_context["dimension"]
     filtered = etm_context["filtered"].copy()
+    period_start = etm_context["period_start"]
     period_end = etm_context["period_end"]
 
     if filtered.empty:
@@ -264,7 +280,7 @@ def render(ctx):
         return
 
     available_months = etm_context["fact_months"]
-    months = [month for month in available_months if month <= period_end]
+    months = [month for month in available_months if period_start <= month <= period_end]
     actual_cols = [f"Факт_{month}_{CURR_YEAR}" for month in months]
     plan_cols = [f"План_{month}_{CURR_YEAR}" for month in months]
     fact_base_cols = [f"Факт_{month}_{BASE_YEAR}" for month in months]
@@ -277,7 +293,7 @@ def render(ctx):
     gap = fact_curr_total - plan_curr_total
 
     st.caption(
-        f"Период анализа: январь — {MONTHS[period_end - 1].lower()} {CURR_YEAR} года; "
+        f"Период анализа: {MONTHS[period_start - 1].lower()} — {MONTHS[period_end - 1].lower()} {CURR_YEAR} года; "
         f"сравнение YoY — с теми же месяцами {BASE_YEAR} года."
     )
 
@@ -544,7 +560,7 @@ def render(ctx):
         st.download_button(
             "📥 Скачать отчёт Excel",
             data=report,
-            file_name=f"ETM_аналитика_{kind}_{period_end:02d}_{CURR_YEAR}.xlsx",
+            file_name=f"ETM_аналитика_{kind}_{period_start:02d}-{period_end:02d}_{CURR_YEAR}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width="stretch",
         )
