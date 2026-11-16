@@ -21,6 +21,31 @@ LBL_CUM_FACT_BASE = f"Накопительный факт {BASE_YEAR}"
 LBL_CUM_FACT_CURR = f"Накопительный факт {CURR_YEAR}"
 LBL_CUM_PLAN_CURR = f"Накопительный план {CURR_YEAR}"
 
+YEAR_SERIES_STYLES = {
+    LBL_FACT_BASE: ("#94A3B8", "dash"),
+    LBL_FACT_CURR: ("#4F46E5", "solid"),
+    LBL_PLAN_CURR: ("#B45309", "dot"),
+    LBL_CUM_FACT_BASE: ("#94A3B8", "dash"),
+    LBL_CUM_FACT_CURR: ("#4F46E5", "solid"),
+    LBL_CUM_PLAN_CURR: ("#B45309", "dot"),
+    str(BASE_YEAR): ("#94A3B8", "dash"),
+    str(CURR_YEAR): ("#4F46E5", "solid"),
+}
+
+
+def _apply_year_palette(figure):
+    """Единые цвета факта и плана, независимо от порядка серий."""
+    for trace in figure.data:
+        style = YEAR_SERIES_STYLES.get(trace.name)
+        if style is None:
+            continue
+        color, dash = style
+        trace.update(marker_color=color)
+        if trace.type == "scatter":
+            trace.update(line=dict(color=color, dash=dash))
+    return figure
+
+
 DIM_NAMES = ["ПОК", "РК", "ДП", "Макрорегион ДКС", "ОП", "37 кл"]
 DIMENSION_NAMES = ("Специализация", "Товарная категория")
 
@@ -238,7 +263,48 @@ def _aggregate(frame, group_fields, actual_cols, plan_cols, fact_base_cols):
     grouped[LBL_YOY] = grouped.apply(
         lambda row: _pct(row[LBL_FACT_CURR] - row[LBL_FACT_BASE], row[LBL_FACT_BASE]), axis=1
     )
+    for column in ("Выполнение, %", LBL_YOY):
+        grouped[column] = pd.to_numeric(grouped[column], errors="coerce")
     return grouped
+
+
+def _contribution(frame, dimension, base_total):
+    result = frame.groupby(dimension, dropna=False)[[LBL_FACT_BASE, LBL_FACT_CURR]].sum().reset_index()
+    result["Изменение продаж"] = result[LBL_FACT_CURR] - result[LBL_FACT_BASE]
+    result["Вклад в общий YoY, п.п."] = result["Изменение продаж"].map(
+        lambda value: _pct(value, base_total)
+    )
+    return result.sort_values("Изменение продаж")
+
+
+def _render_contribution(frame, dimension, base_total, key):
+    contribution = _contribution(frame, dimension, base_total)
+    fig = go.Figure(go.Bar(
+        x=contribution["Изменение продаж"], y=contribution[dimension],
+        orientation="h",
+        marker_color=["#2ca02c" if value >= 0 else "#d62728"
+                      for value in contribution["Изменение продаж"]],
+        hovertemplate="%{y}<br>Изменение: %{x:,.0f}<extra></extra>",
+    ))
+    fig.add_vline(x=0, line_color="gray")
+    fig.update_layout(
+        xaxis_title=f"Факт {CURR_YEAR} − факт {BASE_YEAR}", yaxis_title="",
+        height=max(360, 28 * len(contribution) + 100),
+    )
+    st.plotly_chart(fig, width="stretch", key=key,
+                    alt=f"Вклад {dimension} в изменение продаж за выбранный период")
+    if not base_total:
+        st.caption("Вклад в общий YoY не рассчитан: суммарный факт базового года равен нулю.")
+    st.dataframe(contribution, hide_index=True, width="stretch", column_config={
+        "Вклад в общий YoY, п.п.": st.column_config.NumberColumn(format="%.1f"),
+    })
+
+
+def _op_monthly_execution(frame, months):
+    actual = frame.groupby("ОП")[[f"Факт_{m}_{CURR_YEAR}" for m in months]].sum()
+    plan = frame.groupby("ОП")[[f"План_{m}_{CURR_YEAR}" for m in months]].sum()
+    actual.columns = plan.columns = [MONTHS[m - 1] for m in months]
+    return actual.div(plan.where(plan != 0)).mul(100).sort_index()
 
 
 def _excel_report(summary, by_op, by_dimension, monthly, source_rows):
@@ -255,10 +321,10 @@ def _excel_report(summary, by_op, by_dimension, monthly, source_rows):
 
 def render(ctx):
     st.title("ЭТМ — аналитика продаж")
-    st.caption(
-        "Обзор выполнения плана, динамики и структуры. Источники: «%ВП ГО DKC по спец» и «%ВП ГО DKC по ТГ». "
-        "Загрузка файла и все фильтры находятся в общей боковой панели приложения."
-    )
+#    st.caption(
+#        "Обзор выполнения плана, динамики и структуры. Источники: «%ВП ГО DKC по спец» и «%ВП ГО DKC по ТГ». "
+#        "Загрузка файла и все фильтры находятся в общей боковой панели приложения."
+#    )
 
     etm_context = ctx.get("etm")
     if not etm_context:
@@ -292,13 +358,13 @@ def render(ctx):
     yoy = _pct(fact_curr_total - fact_base_total, fact_base_total)
     gap = fact_curr_total - plan_curr_total
 
-    st.caption(
-        f"Период анализа: {MONTHS[period_start - 1].lower()} — {MONTHS[period_end - 1].lower()} {CURR_YEAR} года; "
-        f"сравнение YoY — с теми же месяцами {BASE_YEAR} года."
-    )
+#    st.caption(
+#        f"Период анализа: {MONTHS[period_start - 1].lower()} — {MONTHS[period_end - 1].lower()} {CURR_YEAR} года; "
+#        f"сравнение YoY — с теми же месяцами {BASE_YEAR} года."
+#    )
 
-    overview_tab, dynamics_tab, structure_tab, op_tab, detail_tab = st.tabs(
-        ["📊 Обзор", "📈 Динамика", "🧩 Структура", "🏙 По ОП", "📋 Детализация"]
+    overview_tab, dynamics_tab, op_tab, detail_tab = st.tabs(
+        ["📊 Обзор", "📈 Динамика", "🏙 По ОП", "📋 Детализация"]
     )
 
     # Данные для всех разделов
@@ -347,6 +413,19 @@ def render(ctx):
         k4.metric("Отклонение от плана", _fmt(gap), delta="выше плана" if gap >= 0 else "ниже плана", delta_color="normal" if gap >= 0 else "inverse")
         k5.metric(LBL_FACT_BASE, _fmt(fact_base_total))
 
+        st.subheader(f"Вклад в изменение продаж: {BASE_YEAR} → {CURR_YEAR}")
+        st.caption(
+            "Изменение — разница факта за выбранный период и тех же месяцев прошлого года. "
+            "Вклад в общий YoY — эта разница, делённая на общий факт базового года, в процентных пунктах."
+        )
+        left, right = st.columns(2)
+        with left:
+            st.markdown("### По ОП")
+            _render_contribution(by_op, "ОП", fact_base_total, "etm_contribution_op")
+        with right:
+            st.markdown(f"### {dimension}")
+            _render_contribution(by_dimension, dimension, fact_base_total, "etm_contribution_dimension")
+
         st.subheader("Динамика по месяцам")
         month_names = [MONTHS[m - 1] for m in months]
         dyn_fig = go.Figure()
@@ -367,7 +446,7 @@ def render(ctx):
         dyn_fig.update_layout(hovermode="x unified",
                               yaxis_title="Значение из выгрузки",
                               xaxis_title="Месяц")
-        st.plotly_chart(dyn_fig, width="stretch")
+        st.plotly_chart(_apply_year_palette(dyn_fig), width="stretch")
 
         st.subheader("Сравнение Севера и Юга")
         if not by_geo.empty:
@@ -402,69 +481,63 @@ def render(ctx):
             op_show[col] = op_show[col].round(1)
         st.dataframe(_display_df(op_show.head(30)), width="stretch", hide_index=True)
 
-        st.subheader("Автоматические сигналы")
-        critical = by_op[by_op["Статус"] == "Критично"].head(5)
-        attention = by_op[by_op["Статус"].isin(["Внимание", "Есть снижение"])].head(5)
-        if critical.empty and attention.empty:
-            st.success("По выбранным фильтрам нет ОП с выполнением плана ниже 100% и отрицательной динамикой.")
-        else:
-            for _, row in critical.iterrows():
-                st.error(
-                    f"{row['ОП']} ({row['География']}): выполнение плана "
-                    f"{row['Выполнение, %']:.1f}% — критическая зона."
-                    if pd.notna(row["Выполнение, %"]) else f"{row['ОП']}: критическая зона, проверьте плановые данные."
-                )
-            for _, row in attention.iterrows():
-                exec_text = f"{row['Выполнение, %']:.1f}%" if pd.notna(row["Выполнение, %"]) else "нет данных по плану"
-                yoy_text = f"{row[LBL_YOY]:+.1f}%" if pd.notna(row[LBL_YOY]) else "нет базы для сравнения"
-                st.warning(f"{row['ОП']} ({row['География']}): выполнение {exec_text}; динамика к {BASE_YEAR} году {yoy_text}.")
-
     with dynamics_tab:
-        st.subheader(f"Факт {BASE_YEAR} и {CURR_YEAR} по месяцам")
+        st.subheader(f"Факт {BASE_YEAR} и {CURR_YEAR} и план {CURR_YEAR} по месяцам")
         trend_fig = go.Figure()
         trend_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_FACT_BASE], mode="lines+markers", name=LBL_FACT_BASE))
         trend_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_FACT_CURR], mode="lines+markers", name=LBL_FACT_CURR))
+        trend_fig.add_trace(go.Scatter(
+            x=monthly["Месяц"], y=monthly[LBL_PLAN_CURR],
+            mode="lines+markers", name=LBL_PLAN_CURR,
+            line=dict(dash="dot"),
+        ))
         trend_fig.update_layout(hovermode="x unified", yaxis_title="Значение из выгрузки", xaxis_title="Месяц")
-        st.plotly_chart(trend_fig, width="stretch")
+        st.plotly_chart(_apply_year_palette(trend_fig), width="stretch")
 
-        st.subheader("Накопительный итог с начала года")
+        st.subheader("Накопительный итог за выбранный период")
         cumulative_fig = go.Figure()
-        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_CUM_FACT_BASE], mode="lines+markers", name=f"{LBL_FACT_BASE} YTD"))
-        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_CUM_FACT_CURR], mode="lines+markers", name=f"{LBL_FACT_CURR} YTD"))
-        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_CUM_PLAN_CURR], mode="lines+markers", name=f"{LBL_PLAN_CURR} YTD", line=dict(dash="dash")))
+        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_CUM_FACT_BASE], mode="lines+markers", name=LBL_CUM_FACT_BASE))
+        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_CUM_FACT_CURR], mode="lines+markers", name=LBL_CUM_FACT_CURR))
+        cumulative_fig.add_trace(go.Scatter(x=monthly["Месяц"], y=monthly[LBL_CUM_PLAN_CURR], mode="lines+markers", name=LBL_CUM_PLAN_CURR, line=dict(dash="dash")))
         cumulative_fig.update_layout(hovermode="x unified", yaxis_title="Накопительное значение", xaxis_title="Месяц")
-        st.plotly_chart(cumulative_fig, width="stretch")
+        st.plotly_chart(_apply_year_palette(cumulative_fig), width="stretch")
 
         st.subheader(f"Факт и план {CURR_YEAR} по месяцам")
         plan_fig = go.Figure()
         plan_fig.add_trace(go.Bar(x=monthly["Месяц"], y=monthly[LBL_FACT_CURR], name=LBL_FACT_CURR))
         plan_fig.add_trace(go.Bar(x=monthly["Месяц"], y=monthly[LBL_PLAN_CURR], name=LBL_PLAN_CURR))
         plan_fig.update_layout(barmode="group", yaxis_title="Значение из выгрузки", xaxis_title="Месяц")
-        st.plotly_chart(plan_fig, width="stretch")
+        st.plotly_chart(_apply_year_palette(plan_fig), width="stretch")
         st.dataframe(_display_df(monthly), width="stretch", hide_index=True)
 
-    with structure_tab:
-        st.subheader(f"ТОП-10 {dimension.lower()} по факту {CURR_YEAR}")
-        top10 = by_dimension.head(10).sort_values(LBL_FACT_CURR, ascending=True)
-        top_fig = px.bar(top10, x=LBL_FACT_CURR, y=dimension, orientation="h", text=LBL_FACT_CURR)
-        top_fig.update_layout(yaxis_title="", xaxis_title="Значение из выгрузки", height=520)
-        st.plotly_chart(top_fig, width="stretch")
+        st.subheader("Выполнение плана по месяцам, %")
+        execution_fig = go.Figure(go.Bar(
+            x=monthly["Месяц"], y=monthly["Выполнение, %"],
+            text=monthly["Выполнение, %"], texttemplate="%{text:.1f}%",
+            hovertemplate="%{x}<br>Выполнение: %{y:.1f}%<extra></extra>",
+        ))
+        execution_fig.add_hline(y=100, line_dash="dash", annotation_text="План 100%")
+        execution_fig.update_layout(yaxis_title="Выполнение плана, %", xaxis_title="Месяц")
+        st.plotly_chart(execution_fig, width="stretch", key="etm_monthly_execution",
+                        alt="Выполнение плана по месяцам относительно уровня 100 процентов")
 
-        st.subheader(f"Направления с наибольшим снижением к {BASE_YEAR} году")
-        declines = by_dimension[by_dimension[LBL_YOY].notna()].sort_values(LBL_YOY).head(10)
-        if declines.empty:
-            st.info("Нет направлений с базой для сравнения.")
-        else:
-            decline_show = declines[[dimension, LBL_FACT_BASE, LBL_FACT_CURR, LBL_YOY, "Выполнение, %", "Статус"]].copy()
-            decline_show[LBL_YOY] = decline_show[LBL_YOY].round(1)
-            decline_show["Выполнение, %"] = decline_show["Выполнение, %"].round(1)
-            st.dataframe(_display_df(decline_show), width="stretch", hide_index=True)
-
-        st.subheader("Полная структура")
-        structure_show = by_dimension[[dimension, LBL_FACT_CURR, "Доля в продажах, %", LBL_PLAN_CURR, "Выполнение, %", LBL_YOY, "Статус"]].copy()
-        for col in ["Доля в продажах, %", "Выполнение, %", LBL_YOY]:
-            structure_show[col] = structure_show[col].round(1)
-        st.dataframe(_display_df(structure_show), width="stretch", hide_index=True)
+        st.subheader("Выполнение плана: ОП × месяц")
+        heatmap = _op_monthly_execution(filtered, months)
+        heat_fig = go.Figure(go.Heatmap(
+            z=heatmap.to_numpy(dtype=float, na_value=float("nan")),
+            x=heatmap.columns.tolist(), y=heatmap.index.tolist(),
+            zmin=0, zmax=200, zmid=100,
+            colorscale=[[0, "#d73027"], [0.5, "#ffffbf"], [1, "#1a9850"]],
+            colorbar=dict(title="Выполнение, %"),
+            texttemplate="%{z:.1f}%", hoverongaps=False,
+            hovertemplate="%{y}<br>%{x}<br>Выполнение: %{z:.1f}%<extra></extra>",
+        ))
+        heat_fig.update_layout(height=max(320, 32 * len(heatmap) + 140),
+                               xaxis_title="Месяц", yaxis_title="ОП",
+                               yaxis_autorange="reversed", plot_bgcolor="#eeeeee")
+        st.plotly_chart(heat_fig, width="stretch", key="etm_op_heatmap",
+                        alt="Выполнение месячного плана по каждому офису продаж")
+        st.caption("При нулевом плане процент не рассчитывается. Цветовая шкала: 0–200%; значения выше 200% показаны насыщенным зелёным.")
 
     with op_tab:
         ops = by_op.sort_values(LBL_FACT_CURR, ascending=False)["ОП"].tolist()
@@ -475,14 +548,12 @@ def render(ctx):
             ops = ops[:MAX_OP_CHARTS]
 
         month_names = [MONTHS[m - 1] for m in months]
-        charts_per_row = 2
-
-        # ---------- помесячная динамика по ОП ----------
-        st.subheader(f"Динамика по месяцам: {BASE_YEAR} vs {CURR_YEAR}")
-        for row_start in range(0, len(ops), charts_per_row):
-            cols = st.columns(charts_per_row)
-            for col, op in zip(cols, ops[row_start:row_start + charts_per_row]):
-                op_rows = filtered[filtered["ОП"] == op]
+        for op in ops:
+            st.subheader(op)
+            op_rows = filtered[filtered["ОП"] == op]
+            left, right = st.columns(2)
+            with left:
+                st.markdown(f"### Динамика по месяцам: {BASE_YEAR} vs {CURR_YEAR}")
                 series = [
                     ([float(op_rows[f"Факт_{m}_{BASE_YEAR}"].sum()) for m in months],
                      LBL_FACT_BASE, "dash"),
@@ -499,26 +570,21 @@ def render(ctx):
                     ))
                 fig_op.update_layout(
                     title=op,
-                    height=320,
+                    height=420,
                     margin=dict(t=50, b=30),
                     hovermode="x unified",
                     xaxis_title="",
                     yaxis_title="Значение из выгрузки",
                     legend_title="",
                 )
-                with col:
-                    st.plotly_chart(fig_op, width="stretch")
-
-        # ---------- ТОП-10 разреза по ОП ----------
-        st.subheader(f"{dimension} по ОП (ТОП-10): {BASE_YEAR} vs {CURR_YEAR}")
-        st.caption("ТОП-10 по сумме двух лет за выбранный период.")
-        for row_start in range(0, len(ops), charts_per_row):
-            cols = st.columns(charts_per_row)
-            for col, op in zip(cols, ops[row_start:row_start + charts_per_row]):
-                op_rows = filtered[filtered["ОП"] == op]
+                st.plotly_chart(_apply_year_palette(fig_op), width="stretch", key=f"etm_op_monthly_{op}")
+            with right:
+                st.markdown(f"### {dimension} по ОП (ТОП-10): {BASE_YEAR} vs {CURR_YEAR}")
+                st.caption("ТОП-10 по сумме факта двух лет за выбранный период. Медная черта — план текущего года.")
                 pivot = pd.DataFrame({
                     LBL_FACT_BASE: op_rows.groupby(dimension)[fact_base_cols].sum().sum(axis=1),
                     LBL_FACT_CURR: op_rows.groupby(dimension)[actual_cols].sum().sum(axis=1),
+                    LBL_PLAN_CURR: op_rows.groupby(dimension)[plan_cols].sum().sum(axis=1),
                 })
                 pivot["_total"] = pivot[LBL_FACT_BASE] + pivot[LBL_FACT_CURR]
                 top10 = pivot.sort_values("_total", ascending=False).head(10)
@@ -530,6 +596,13 @@ def render(ctx):
                                          orientation="h", name=str(BASE_YEAR)))
                 fig_top.add_trace(go.Bar(y=top10.index, x=top10[LBL_FACT_CURR],
                                          orientation="h", name=str(CURR_YEAR)))
+                fig_top.add_trace(go.Scatter(
+                    x=top10[LBL_PLAN_CURR], y=top10.index,
+                    mode="markers", name=LBL_PLAN_CURR,
+                    marker=dict(symbol="line-ns", size=24, line=dict(width=3, color=YEAR_SERIES_STYLES[LBL_PLAN_CURR][0])),
+                    hovertemplate="%{y}<br>План: %{x:,.0f}<extra></extra>",
+                    cliponaxis=False,
+                ))
                 fig_top.update_layout(
                     title=op,
                     barmode="group",
@@ -539,8 +612,7 @@ def render(ctx):
                     yaxis_title="",
                     legend_title="",
                 )
-                with col:
-                    st.plotly_chart(fig_top, width="stretch")
+                st.plotly_chart(_apply_year_palette(fig_top), width="stretch", key=f"etm_op_top10_{op}")
 
     with detail_tab:
         st.subheader("Детализация по ОП")
@@ -565,7 +637,3 @@ def render(ctx):
             width="stretch",
         )
 
-    st.caption(
-        "Единицы измерения не подписаны как рубли: в тестовой выгрузке их бизнес-смысл не подтверждён. "
-        "Прогноз до конца года не рассчитывается, чтобы не выдавать простой пересчёт темпа за достоверный прогноз."
-    )

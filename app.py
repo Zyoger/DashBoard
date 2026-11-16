@@ -7,7 +7,7 @@ from data_loader import load_sales
 from plans import load_plans, parse_plans
 from tabs import tab_dynamics, tab_project, tab_rs, tab_etm, tab_partners
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.19"
 
 st.set_page_config(page_title="Продажи ЦО", layout="wide")
 
@@ -45,7 +45,12 @@ if "plans_df" not in st.session_state:
     st.session_state["plans_df"] = load_plans()
 
 
-def _multiselect(label, options, key, default=None):
+def _reset_filter_keys(keys):
+    for key in keys:
+        st.session_state.pop(key, None)
+
+
+def _multiselect(label, options, key, default=None, on_change=None, args=None):
     """Мультивыбор с очисткой устаревших значений при изменении родительских фильтров."""
     options = list(options)
     if key in st.session_state:
@@ -57,7 +62,7 @@ def _multiselect(label, options, key, default=None):
         # Явно задаём состояние: после сброса Streamlit не должен
         # восстанавливать прежний пустой выбор существующего виджета.
         st.session_state[key] = list(default) if default is not None else []
-    return st.multiselect(label, options, key=key)
+    return st.multiselect(label, options, key=key, on_change=on_change, args=args)
 
 
 def _project_multiselect(label, series, key):
@@ -86,6 +91,7 @@ with st.sidebar:
                 )
                 for state_key in SALES_FILTER_KEYS:
                     st.session_state.pop(state_key, None)
+                tab_rs.reset_sidebar_filters()
                 st.cache_data.clear()
             st.success(f"Файл продаж: {sales_upload.name}")
 
@@ -95,6 +101,7 @@ with st.sidebar:
             st.session_state["sales_bytes"] = None
             for state_key in SALES_FILTER_KEYS:
                 st.session_state.pop(state_key, None)
+            tab_rs.reset_sidebar_filters()
             st.cache_data.clear()
             st.rerun()
 
@@ -106,9 +113,9 @@ with st.sidebar:
         if plan_upload is not None:
             payload = plan_upload.getvalue()
             if payload != st.session_state["plan_bytes"]:
-                st.session_state["plan_bytes"] = payload
                 try:
                     st.session_state["plans_df"] = parse_plans(BytesIO(payload))
+                    st.session_state["plan_bytes"] = payload
                     st.success(f"Файл плана: {plan_upload.name}")
                 except Exception as exc:
                     st.error(f"Не удалось прочитать файл плана: {exc}")
@@ -186,6 +193,7 @@ with st.sidebar:
             years = sorted(int(y) for y in sales["Год"].dropna().unique())
 
             with st.expander("🔎 Фильтры продаж", expanded=False):
+                st.caption("Эти фильтры не влияют на «Русский Свет»: у него отдельный блок ниже.")
                 cities = sorted(sales["Город"].dropna().unique())
                 city = _multiselect("Город", cities, "sales_city", cities)
 
@@ -223,6 +231,8 @@ with st.sidebar:
             st.error(f"Ошибка чтения файла продаж: {exc}")
     else:
         st.info("Загрузите файл продаж в разделе «Загрузка данных», чтобы открыть вкладки продаж.")
+
+    rs_filters = tab_rs.sidebar_filters(sales) if sales is not None else None
 
     # --------------------------- ЭТМ ---------------------------------
     etm_context = None
@@ -275,8 +285,11 @@ with st.sidebar:
                         default = [value for value in options if value == "ОП"]
                     elif field == "ПОК":
                         default = [value for value in options if value.startswith("DKC (138+2572")]
+                    downstream_keys = [filter_keys[name] for name in filter_fields[filter_fields.index(field) + 1:]]
+                    downstream_keys += [f"etm_sidebar_v104_dimension_{kind}" for kind in ETM_SHEETS]
                     selected_filters[field] = _multiselect(
-                        field, options, filter_keys[field], default=default
+                        field, options, filter_keys[field], default=default,
+                        on_change=_reset_filter_keys, args=(downstream_keys,),
                     )
 
                 filtered_etm = etm_df.copy()
@@ -503,7 +516,7 @@ with tab3:
     if sales is None:
         st.info("Для работы раздела загрузите файл продаж в боковой панели.")
     else:
-        tab_rs.render(ctx)
+        tab_rs.render(dict(ctx, **rs_filters))
 
 with tab4:
     tab_etm.render(ctx)
