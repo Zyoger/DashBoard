@@ -43,11 +43,11 @@ def _filter_multiselect(label, options, key, follow_options=False, on_change=Non
     return st.multiselect(label, options, key=key, on_change=on_change)
 
 
-def sidebar_filters(sales):
+def sidebar_filters(sales, expanded=False):
     """Независимые фильтры РС, построенные на полной исходной выгрузке."""
     source = sales.loc[sales["Дистрибьютор"].astype(str).str.strip().str.casefold() == RS_NAME]
     result = {"base": source, "base_year": None, "curr_year": None, "rs_months": []}
-    with st.expander("🟦 Фильтры Русского Света", expanded=False):
+    with st.expander("🟦 Фильтры Русского Света", expanded=expanded, key="main_filter_rs", on_change="rerun"):
         if source.empty:
             st.info("В файле продаж нет строк дистрибьютора «Русский Свет».")
             return result

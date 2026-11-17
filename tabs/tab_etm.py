@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from numeric_validation import numeric_values
 
 
 # Годы анализа: базовый (факт прошлого года) и отчётный (план + факт).
@@ -181,11 +182,11 @@ def _read_etm(
     data["География"] = data["ОП"].map(_city_zone)
 
     for month, idx in fact_base.items():
-        data[f"Факт_{month}_{BASE_YEAR}"] = pd.to_numeric(body.iloc[:, idx], errors="coerce").fillna(0)
+        data[f"Факт_{month}_{BASE_YEAR}"] = body.iloc[:, idx]
     for month, idx in plan_curr.items():
-        data[f"План_{month}_{CURR_YEAR}"] = pd.to_numeric(body.iloc[:, idx], errors="coerce").fillna(0)
+        data[f"План_{month}_{CURR_YEAR}"] = body.iloc[:, idx]
     for month, idx in fact_curr.items():
-        data[f"Факт_{month}_{CURR_YEAR}"] = pd.to_numeric(body.iloc[:, idx], errors="coerce").fillna(0)
+        data[f"Факт_{month}_{CURR_YEAR}"] = body.iloc[:, idx]
 
     # Исключаем строки итогов, чтобы не задваивать суммы при группировках.
     text_cols = DIM_NAMES + [dimension_name]
@@ -204,6 +205,13 @@ def _read_etm(
         category_codes = data[dimension_name].str.extract(r"^\s*([^\s\-–—]+)", expand=False).str.casefold()
         excluded_codes = {code.casefold() for code in excluded_categories}
         data = data.loc[~category_codes.isin(excluded_codes)].copy()
+
+    for prefix, columns, year in (("Факт", fact_base, BASE_YEAR),
+                                  ("План", plan_curr, CURR_YEAR),
+                                  ("Факт", fact_curr, CURR_YEAR)):
+        for month, idx in columns.items():
+            field = f"{prefix}_{month}_{year}"
+            data[field] = numeric_values(data[field], str(header.iloc[idx]), header_row + 2).fillna(0)
 
     for field in text_cols:
         data[field] = data[field].fillna("(пусто)").astype(str).str.strip()
@@ -296,7 +304,8 @@ def _render_contribution(frame, dimension, base_total, key):
     if not base_total:
         st.caption("Вклад в общий YoY не рассчитан: суммарный факт базового года равен нулю.")
     st.dataframe(contribution, hide_index=True, width="stretch", column_config={
-        "Вклад в общий YoY, п.п.": st.column_config.NumberColumn(format="%.1f"),
+        column: st.column_config.NumberColumn(format="%.0f")
+        for column in contribution.select_dtypes(include="number").columns
     })
 
 
@@ -451,11 +460,12 @@ def render(ctx):
         st.subheader("Сравнение Севера и Юга")
         if not by_geo.empty:
             geo_show = by_geo[["География", LBL_FACT_CURR, LBL_PLAN_CURR, "Выполнение, %", LBL_FACT_BASE, LBL_YOY]].copy()
+            geo_table = geo_show.copy()
             geo_show["Выполнение, %"] = geo_show["Выполнение, %"].round(1)
             geo_show[LBL_YOY] = geo_show[LBL_YOY].round(1)
             left, right = st.columns([1.15, 1])
             with left:
-                st.dataframe(_display_df(geo_show), width="stretch", hide_index=True)
+                st.dataframe(_display_df(geo_table), width="stretch", hide_index=True)
             with right:
                 geo_fig = px.bar(
                     geo_show, x="География", y="Выполнение, %", color="География",
@@ -477,8 +487,6 @@ def render(ctx):
 
         st.subheader("Рейтинг ОП — зоны внимания вверху")
         op_show = by_op[["География", "ОП", LBL_FACT_CURR, LBL_PLAN_CURR, "Выполнение, %", LBL_YOY, "Отклонение от плана", "Статус"]].copy()
-        for col in ["Выполнение, %", LBL_YOY]:
-            op_show[col] = op_show[col].round(1)
         st.dataframe(_display_df(op_show.head(30)), width="stretch", hide_index=True)
 
     with dynamics_tab:

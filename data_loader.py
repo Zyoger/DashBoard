@@ -1,5 +1,6 @@
 import pandas as pd
 from pathlib import Path
+from numeric_validation import numeric_values
 
 MONTHS_RU = {
     "Январь": 1, "Февраль": 2, "Март": 3, "Апрель": 4,
@@ -52,6 +53,9 @@ def load_sales(path: str | Path, engine: str = "openpyxl") -> pd.DataFrame:
     if not month_cols:
         raise ValueError("Не найдены колонки месяцев формата 'Месяц Год'")
 
+    for column in month_cols:
+        df[column] = numeric_values(df[column], column, row_offset=17).fillna(0)
+
     id_cols = ["Город", "Дистрибьютор", "Код_материала", "Материал"]
     long = df.melt(
         id_vars=id_cols,
@@ -59,7 +63,6 @@ def load_sales(path: str | Path, engine: str = "openpyxl") -> pd.DataFrame:
         var_name="Месяц_подпись",
         value_name="Сумма_без_НДС",
     )
-    long["Сумма_без_НДС"] = pd.to_numeric(long["Сумма_без_НДС"], errors="coerce").fillna(0)
 
     parsed = long["Месяц_подпись"].map(_parse_month)
     long["Год"] = parsed.map(lambda x: x[0] if x else None)

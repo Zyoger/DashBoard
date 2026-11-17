@@ -5,7 +5,10 @@ from io import BytesIO
 import re
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
+from numeric_validation import numeric_values
+from project_analytics import prepare_projects, metrics, compare_periods, distributor_comparison, latest_year_rows
 
 SHEET_NAME = "Предложение"
 COLUMN_MAP = {
@@ -53,7 +56,7 @@ def parse_project_file(payload: bytes) -> pd.DataFrame:
         df[column] = df[column].astype("string").str.strip()
         df[column] = df[column].replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
     for column in NUMERIC_COLUMNS:
-        df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
+        df[column] = numeric_values(df[column], column).fillna(0)
     df["Дата создания"] = pd.to_datetime(df["Дата создания"], errors="coerce")
 
     # Город берём только из явного фрагмента «г. ...» в поле дистрибьютора.
@@ -70,7 +73,7 @@ def parse_project_file(payload: bytes) -> pd.DataFrame:
 
     df["Город"] = df["Дистрибьютор"].map(extract_city)
     df["Месяц"] = df["Дата создания"].dt.to_period("M").dt.to_timestamp()
-    return df
+    return prepare_projects(df)
 
 
 def _multi_filter(label: str, series: pd.Series, key: str):
@@ -87,6 +90,110 @@ def _percent(value: float) -> str:
 
 
 def render(ctx: dict | None = None):
+    overview, dynamics, distributors = st.tabs(["Обзор", "Динамика", "Дистрибьюторы"])
+    with overview:
+        _render_comparison_summary(ctx or {})
+        _render_overview(ctx)
+    with dynamics:
+        _render_dynamics(ctx or {})
+    with distributors:
+        _render_dimension(ctx or {}, ["Дистрибьютор", "Город"], "Дистрибьюторы и филиалы")
+
+
+def _period_frames(ctx):
+    df = ctx.get("project_comparison_df")
+    filters = ctx.get("project_filters", {})
+    base, current = filters.get("compare_base", ()), filters.get("compare_current", ())
+    if df is None or len(base) != 2 or len(current) != 2:
+        return None
+    return compare_periods(df, base, current)
+
+
+def _render_comparison_summary(ctx):
+    source = ctx.get("project_df")
+    if source is None or source.empty:
+        return
+    filtered = ctx.get("project_filtered_df")
+    year, current_rows = latest_year_rows(source, source if filtered is None else filtered)
+    if year is None or current_rows.empty:
+        return
+    current = metrics(current_rows)
+    st.subheader(f"Показатели за {year} год")
+    cols = st.columns(4)
+    for i, (name, value) in enumerate(current.items()):
+        text = "н/д" if value is None else f"{value:,.1f}".replace(",", " ")
+        cols[i % 4].metric(name, text)
+    missing = int(current_rows["ID проекта"].isna().sum())
+    if missing:
+        st.warning(f"Строк без идентификатора проекта: {missing}. Они включены в суммы и число предложений, но не в число проектов.")
+    st.caption("Заказы показаны по дате создания предложения; это не дата оформления заказа.")
+
+
+def _render_dimension(ctx, fields, title):
+    st.subheader(title)
+    periods = _period_frames(ctx)
+    if periods is None:
+        st.info("Загрузите проектные выгрузки и выберите интервалы сравнения.")
+        return
+    tables = []
+    for label, frame in zip(("Прошлый период", "Текущий период"), periods):
+        records = []
+        for keys, group in frame.groupby(fields, dropna=False, sort=False):
+            keys = keys if isinstance(keys, tuple) else (keys,)
+            records.append({**dict(zip(fields, keys)), **metrics(group)})
+        table = pd.DataFrame(records, columns=fields + list(metrics(frame)))
+        tables.append(table.rename(columns={col: f"{col} ({label})" for col in table.columns if col not in fields}))
+    result = tables[0].merge(tables[1], on=fields, how="outer")
+    if result.empty:
+        st.info("По выбранным фильтрам данных нет.")
+        return
+    st.dataframe(result, hide_index=True, width="stretch")
+    st.caption("Данные соответствуют выбранным периодам сравнения.")
+    order_column = "Сумма заказов, руб. (Текущий период)"
+    top = result.sort_values(order_column, ascending=False).head(15).copy()
+    top["Разрез"] = top[fields].fillna("(не указано)").astype(str).agg(" / ".join, axis=1)
+    st.bar_chart(top.set_index("Разрез")[["Сумма заказов, руб. (Прошлый период)", order_column]], horizontal=True)
+    output = BytesIO()
+    result.to_excel(output, index=False, sheet_name="Сравнение", engine="openpyxl")
+    st.download_button("Скачать таблицу Excel", output.getvalue(), file_name="project_comparison.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"project_export_{fields[0]}")
+
+
+def _render_dynamics(ctx):
+    df = ctx.get("project_comparison_df")
+    filters = ctx.get("project_filters", {})
+    base, current = filters.get("compare_base", ()), filters.get("compare_current", ())
+    if df is None or len(base) != 2 or len(current) != 2:
+        st.info("Загрузите проектные выгрузки и выберите два полных интервала в фильтрах.")
+        return
+    periods = compare_periods(df, base, current)
+    data = distributor_comparison(periods)
+    if data.empty:
+        st.info("По выбранным фильтрам и периодам предложений нет.")
+        return
+    st.caption(f"Периоды по дате создания предложений: {base[0]:%d.%m.%Y}–{base[1]:%d.%m.%Y} и {current[0]:%d.%m.%Y}–{current[1]:%d.%m.%Y}.")
+    if (base[0].month, base[0].day, base[1].month, base[1].day) != (current[0].month, current[0].day, current[1].month, current[1].day):
+        st.warning("Выбранные календарные интервалы различаются; сравнение может быть несопоставимым.")
+    labels = [f"{p[0]:%d.%m.%Y}–{p[1]:%d.%m.%Y}" for p in (base, current)]
+    height = 600
+    count_chart = go.Figure()
+    for suffix, label, color in zip(("прошлый", "текущий"), labels, ("#94A3B8", "#4F46E5")):
+        count_chart.add_bar(x=data.index, y=data[f"Количество — {suffix}"], name=label, marker_color=color, hovertemplate="%{x}<br>Предложений: %{y:,.0f}<extra>%{fullData.name}</extra>")
+    count_chart.update_layout(title="Количество предложений по дистрибьюторам", barmode="group", xaxis_title="Дистрибьютор", yaxis_title="Количество предложений", height=height, margin=dict(l=10, r=20, t=60, b=40))
+    count_chart.update_xaxes(automargin=True, tickangle=-45)
+    st.plotly_chart(count_chart, width="stretch", key="project_dynamics_count")
+
+    money_chart = go.Figure()
+    for metric, suffix, label, color in (("Предложения", "прошлый", labels[0], "#94A3B8"), ("Предложения", "текущий", labels[1], "#4F46E5"), ("Заказы", "прошлый", labels[0], "#CBD5E1"), ("Заказы", "текущий", labels[1], "#B45309")):
+        money_chart.add_bar(x=data.index, y=data[f"{metric} — {suffix}"], name=f"{metric}: {label}", marker_color=color, hovertemplate="%{x}<br>%{y:,.2f} ₽<extra>%{fullData.name}</extra>")
+    money_chart.update_layout(title="Суммы предложений и заказов по дистрибьюторам", barmode="group", xaxis_title="Дистрибьютор", yaxis_title="Сумма без НДС, ₽", height=height, margin=dict(l=10, r=20, t=60, b=40))
+    money_chart.update_xaxes(automargin=True, tickangle=-45)
+    st.plotly_chart(money_chart, width="stretch", key="project_dynamics_amount")
+    st.caption("Предложения — стоимость для дистрибьютора без НДС. Заказы отнесены к дате создания предложения, а не к дате заказа.")
+    if any(part.empty for part in periods):
+        st.warning("В одном из выбранных интервалов нет записей. Проверьте выгрузки и фильтры.")
+
+
+def _render_overview(ctx: dict | None = None):
     """Отображает дашборд проектного взаимодействия."""
     ctx = ctx or {}
     df = ctx.get("project_df")
@@ -95,41 +202,20 @@ def render(ctx: dict | None = None):
         st.info("Загрузите выгрузку проектного взаимодействия (.xlsx) в боковой панели.")
         return
 
-    st.title("🤝 Проектное взаимодействие")
-    st.caption("Аналитика по листу «Предложение». Фильтры находятся в общей боковой панели. Денежные суммы рассчитаны по строкам исходной выгрузки.")
-
     filtered = ctx.get("project_filtered_df")
     if filtered is None:
         filtered = df.copy()
     else:
         filtered = filtered.copy()
 
+    year, filtered = latest_year_rows(df, filtered)
+    if year is None:
+        st.warning("В загруженных данных нет корректных дат создания.")
+        return
     if filtered.empty:
         st.warning("По выбранным фильтрам записей нет. Измените параметры фильтрации.")
         return
 
-    projects_count = filtered["Проект"].nunique()
-    records_count = len(filtered)
-    proposal_sum = filtered["Стоимость для клиента, руб."].sum()
-    orders_sum = filtered["Заказы, руб."].sum()
-    conversion = orders_sum / proposal_sum * 100 if proposal_sum else 0
-    full_orders = filtered.loc[filtered["Стадия"] == "Полный заказ", "Проект"].nunique()
-
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Уникальных проектов", f"{projects_count:,}".replace(",", " "))
-    k2.metric("Записей / предложений", f"{records_count:,}".replace(",", " "))
-    k3.metric("Стоимость предложений", _money(proposal_sum))
-    k4.metric("Сумма заказов", _money(orders_sum))
-    k5.metric("Заказы / предложения", _percent(conversion))
-    st.caption(f"Проекты со стадией «Полный заказ» в отфильтрованных строках: {full_orders:,}".replace(",", " "))
-    missing_requests = int(filtered["Проектный запрос"].isna().sum())
-    st.caption(
-        f"Пустое поле «Проектный запрос»: {missing_requests:,} строк. "
-        "Пустые значения сохранены как есть — соседние значения не подставляются."
-        .replace(",", " ")
-    )
-
-    st.divider()
     left, right = st.columns(2)
     with left:
         st.subheader("Проектное взаимодействие по стадиям")
